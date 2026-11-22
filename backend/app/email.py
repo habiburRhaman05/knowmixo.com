@@ -1,0 +1,52 @@
+import smtplib
+import ssl
+from email.message import EmailMessage
+
+from app.config import settings
+
+
+def send_email(to: str, subject: str, body: str) -> None:
+    s = settings()
+    if not s.smtp_user or not s.smtp_app_password:
+        # Dev fallback when SMTP isn't configured: never silently drop a
+        # verification/reset email during local development.
+        print(f"[email:dev-noop] to={to} subject={subject}\n{body}\n")
+        return
+
+    msg = EmailMessage()
+    msg["From"] = s.email_from or s.smtp_user
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(s.smtp_user, s.smtp_app_password)
+        server.send_message(msg)
+
+
+def send_verification_email(to: str, token: str) -> None:
+    link = f"{settings().public_app_url}/verify-email?token={token}"
+    send_email(
+        to=to,
+        subject="Verify your Knowmivo email",
+        body=f"Confirm your email to finish setting up your Knowmivo account:\n\n{link}\n\nThis link expires in 24 hours.",
+    )
+
+
+def send_password_reset_email(to: str, token: str) -> None:
+    link = f"{settings().public_app_url}/reset-password?token={token}"
+    send_email(
+        to=to,
+        subject="Reset your Knowmivo password",
+        body=f"Reset your password using this link:\n\n{link}\n\nThis link expires in 1 hour. If you did not request this, ignore this email.",
+    )
+
+
+def send_email_change_confirmation(to: str, token: str) -> None:
+    link = f"{settings().public_app_url}/confirm-email-change?token={token}"
+    send_email(
+        to=to,
+        subject="Confirm your new Knowmivo email address",
+        body=f"Confirm this address as your new Knowmivo login email:\n\n{link}\n\nThis link expires in 24 hours.",
+    )
