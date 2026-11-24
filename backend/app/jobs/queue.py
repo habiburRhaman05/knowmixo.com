@@ -5,6 +5,8 @@ transaction create the source version and durable ingestion job."
 """
 import json
 
+from app.job_idempotency import enqueue_job_idempotent, generate_idempotency_key
+
 
 def enqueue_job(
     conn,
@@ -14,30 +16,28 @@ def enqueue_job(
     idempotency_key: str | None = None,
     checkpoint_ref: dict | None = None,
     max_attempts: int = 4,
-) -> str:
-    """Returns the job id. If idempotency_key is given and a job with that
-    key already exists, returns the existing job's id instead of creating a
-    duplicate -- callers get 202 with the same job_id on a retried request."""
-    if idempotency_key:
-        existing = conn.execute(
-            "SELECT id FROM jobs WHERE idempotency_key = %s", (idempotency_key,)
-        ).fetchone()
-        if existing:
-            return str(existing["id"])
+    payload: dict | None = None,
+) -> tuple[str, bool]:
+    """Returns (job_id, is_new_job).
 
-    row = conn.execute(
-        """
-        INSERT INTO jobs (company_id, document_version_id, kind, max_attempts, idempotency_key, checkpoint_ref)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING id
-        """,
-        (
-            company_id,
-            document_version_id,
-            kind,
-            max_attempts,
-            idempotency_key,
-            json.dumps(checkpoint_ref) if checkpoint_ref is not None else None,
-        ),
-    ).fetchone()
-    return str(row["id"])
+    If idempotency_key is given and a job with that key already exists (and
+    is not dead), returns the existing job's id with is_new_job=False.
+    If idempotency_key is not provided, one is generated from company/kind/
+    document_version_id/payload.
+    """
+    if idempotency_key is None:
+        idempotency_key = generate_idempotency_key(
+            company_id, kind, payload or {}, document_version_id
+        )
+
+    job_id, is_new = enqueue_job_idempotent(
+        conn,
+        company_id=company_id,
+        kind=kind,
+        payload=payload or {},
+        document_version_id=document_version_id,
+        idempotency_key=idempotency_key,
+        max_attempts=max_attempts,
+        checkpoint_ref=checkpoint_ref,
+    )
+    return job_id, is_new

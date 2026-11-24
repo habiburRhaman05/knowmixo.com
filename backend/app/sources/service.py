@@ -5,6 +5,8 @@
 from urllib.parse import urlparse
 
 from app.bots.service import get_or_create_bot_for_company
+from app.config import settings
+from app.ingestion.crawler import CrawlError, discover_pages
 from app.jobs.queue import enqueue_job
 from app.security.ssrf_http import SSRFBlocked, validate_url as ssrf_validate_url
 from app.storage import local as storage
@@ -134,6 +136,37 @@ def create_url_source(conn, company_id: str, url: str) -> tuple[str, str]:
     return document_id, job_id
 
 
+def create_crawl_source(conn, company_id: str, root_url: str) -> dict:
+    """Discovers same-domain pages under root_url (sitemap first, bounded
+    link-following fallback) and immediately creates one document +
+    version + ingest job per discovered page. This merges the
+    discover-then-select two-step flow from docs/06-API.md into one call
+    for V1 -- a separate crawl_jobs table plus a page-selection UI is a
+    real frontend/UX feature, not a backend safety property, and is
+    explicitly deferred rather than built here."""
+    try:
+        pages = discover_pages(root_url, max_pages=settings().max_crawl_pages)
+    except CrawlError as exc:
+        raise SourceError(422, exc.code, exc.message) from exc
+
+    if not pages:
+        raise SourceError(422, "no_pages_discovered", "No pages were discovered at this URL.")
+
+    bot_id = get_or_create_bot_for_company(conn, company_id)
+    document_ids = []
+    job_ids = []
+    for page_url in pages:
+        title = urlparse(page_url).path.strip("/") or urlparse(page_url).netloc
+        document_id, version_id, _version = _create_document_and_version(
+            conn, company_id, bot_id, "crawl_page", title, source_url=page_url
+        )
+        job_id = enqueue_job(conn, company_id, kind="ingest_document", document_version_id=version_id)
+        document_ids.append(document_id)
+        job_ids.append(job_id)
+
+    return {"document_ids": document_ids, "job_ids": job_ids, "pages_found": len(pages)}
+
+
 def list_documents(conn, company_id: str) -> list[dict]:
     return conn.execute(
         """
@@ -185,6 +218,43 @@ def delete_document(conn, company_id: str, document_id: str) -> None:
             delete_version_vectors(company_id, str(row["active_version_id"]))
         except Exception:  # noqa: BLE001 -- best-effort; deletion already committed above
             pass
+
+
+_NON_TERMINAL_VERSION_STATUSES = ("pending", "processing", "retrying", "quota_wait")
+
+
+def refresh_document(conn, company_id: str, document_id: str) -> str:
+    """Creates a new version of the same underlying content (re-reads the
+    same stored file / re-fetches the same URL) and reprocesses it --
+    useful after a provider-side fix or embedding-model change, not for
+    submitting new content (that's a future "replace" endpoint). Blocks
+    refreshing while the current version is still mid-processing: two
+    versions racing over the same documents.storage_key is the one real
+    hazard here, and this guard removes it without needing a schema
+    change, since document_versions has no per-version storage_key column
+    (matches docs/05-DATABASE.md's documents-level storage_key field)."""
+    document = conn.execute(
+        "SELECT * FROM documents WHERE id = %s AND company_id = %s AND deleted_at IS NULL",
+        (document_id, company_id),
+    ).fetchone()
+    if not document:
+        raise SourceError(404, "document_not_found", "Document not found.")
+
+    latest = conn.execute(
+        "SELECT id, version, status FROM document_versions WHERE document_id = %s ORDER BY version DESC LIMIT 1",
+        (document_id,),
+    ).fetchone()
+    if latest and latest["status"] in _NON_TERMINAL_VERSION_STATUSES:
+        raise SourceError(409, "refresh_in_progress", "A version is already being processed for this source.")
+
+    next_version = (latest["version"] if latest else 0) + 1
+    version_row = conn.execute(
+        "INSERT INTO document_versions (document_id, version) VALUES (%s, %s) RETURNING id",
+        (document_id, next_version),
+    ).fetchone()
+
+    job_id = enqueue_job(conn, company_id, kind="ingest_document", document_version_id=str(version_row["id"]))
+    return job_id
 
 
 def retry_job(conn, company_id: str, job_id: str) -> bool:

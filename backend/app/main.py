@@ -6,10 +6,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.auth.router import router as auth_router
+from app.bots.router import router as bots_router
 from app.db import connection
 from app.observability import initialize
 from app.profile_router import router as profile_router
+from app.public.router import router as public_router
 from app.sources.router import router as sources_router
+from app.webhooks.router import router as webhooks_router
 
 initialize()
 
@@ -21,6 +24,9 @@ templates = Jinja2Templates(directory=BASE / "templates")
 app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(sources_router)
+app.include_router(bots_router)
+app.include_router(public_router)
+app.include_router(webhooks_router)
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -5,8 +5,10 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
+from app.postgres_resilience import get_pg, PostgresResilience
 
 _pool: ConnectionPool | None = None
+_pg_resilience: PostgresResilience | None = None
 
 
 def get_pool() -> ConnectionPool:
@@ -25,11 +27,32 @@ def get_pool() -> ConnectionPool:
     return _pool
 
 
+def get_pg_resilience() -> PostgresResilience:
+    """Get the PostgresResilience wrapper for resilient database operations."""
+    global _pg_resilience
+    if _pg_resilience is None:
+        _pg_resilience = get_pg()
+    return _pg_resilience
+
+
 @contextmanager
 def connection():
-    """A pooled connection. Commits on clean exit, rolls back on exception."""
-    with get_pool().connection() as conn:
+    """A pooled connection with resilience (retry on transient errors)."""
+    pg = get_pg_resilience()
+    with pg.connection() as conn:
         yield conn
+
+
+def execute_with_retry(query: str, params: tuple = ()):
+    """Execute a query with automatic retry on transient errors."""
+    pg = get_pg_resilience()
+    return pg.execute(query, params)
+
+
+def execute_one_with_retry(query: str, params: tuple = ()):
+    """Execute a query returning one row with automatic retry on transient errors."""
+    pg = get_pg_resilience()
+    return pg.execute_one(query, params)
 
 
 def audit(conn, actor, tenant, action, detail):

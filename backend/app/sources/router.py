@@ -115,6 +115,23 @@ def create_url_source(body: URLSourceRequest, principal: SessionPrincipal = Depe
     return {"document_id": document_id, "job_id": job_id}
 
 
+class CrawlSourceRequest(BaseModel):
+    root_url: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/sources/crawl", status_code=202)
+def create_crawl_source(body: CrawlSourceRequest, principal: SessionPrincipal = Depends(get_verified_principal)):
+    """Discovers same-domain pages (sitemap.xml first, bounded
+    link-following fallback) and queues one ingestion job per page."""
+    company_id = _require_company(principal)
+    try:
+        with connection() as conn:
+            result = service.create_crawl_source(conn, company_id, body.root_url)
+    except SourceError as exc:
+        _raise(exc)
+    return result
+
+
 @router.get("/documents")
 def list_documents(principal: SessionPrincipal = Depends(get_verified_principal)):
     company_id = _require_company(principal)
@@ -132,6 +149,17 @@ def get_document(document_id: str, principal: SessionPrincipal = Depends(get_ver
     except SourceError as exc:
         _raise(exc)
     return row
+
+
+@router.post("/documents/{document_id}/refresh", status_code=202)
+def refresh_document(document_id: str, principal: SessionPrincipal = Depends(get_verified_principal)):
+    company_id = _require_company(principal)
+    try:
+        with connection() as conn:
+            job_id = service.refresh_document(conn, company_id, document_id)
+    except SourceError as exc:
+        _raise(exc)
+    return {"job_id": job_id}
 
 
 @router.delete("/documents/{document_id}", status_code=202)

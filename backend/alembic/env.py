@@ -6,16 +6,11 @@ no duplicate ORM ownership of identity tables"). Migrations are plain SQL
 executed via `op.execute(...)`. SQLAlchemy is used here only as Alembic's
 connection/transaction driver (psycopg3 dialect), never as an ORM layer.
 """
-import sys
+import os
 from logging.config import fileConfig
-from pathlib import Path
 
 from alembic import context
 from sqlalchemy import create_engine
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app.config import settings  # noqa: E402
 
 config = context.config
 
@@ -26,7 +21,12 @@ target_metadata = None
 
 
 def get_sqlalchemy_url() -> str:
-    url = settings().database_url
+    # Reads DATABASE_URL directly from the process environment rather than
+    # going through app.config.settings() -- that Settings class validates
+    # the *entire* app's runtime config (Redis, Pinecone, Cloudflare, Groq),
+    # which has nothing to do with running a schema migration and would
+    # block `alembic upgrade head` on an otherwise-unrelated missing var.
+    url = os.environ.get("DATABASE_URL", "")
     if not url:
         raise RuntimeError("DATABASE_URL is required to run migrations.")
     # Force the psycopg3 dialect regardless of how the URL was written.

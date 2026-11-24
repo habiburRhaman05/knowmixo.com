@@ -1,0 +1,1519 @@
+openapi: 3.0.3
+info:
+  title: Knowmivo API
+  version: 1.0.0
+  description: |
+    Multi-tenant RAG chatbot platform API.
+    All endpoints enforce tenant isolation via company_id scoping.
+    Requires authentication via Bearer token (JWT) in Authorization header.
+  contact:
+    name: Knowmivo Team
+    email: support@knowmivo.com
+  license:
+    name: Proprietary
+servers:
+  - url: https://api.knowmivo.com/v1
+    description: Production
+  - url: https://staging-api.knowmivo.com/v1
+    description: Staging
+  - url: http://localhost:8000/v1
+    description: Local development
+
+tags:
+  - name: bot
+    description: Bot configuration, publishing, and management
+  - name: sources
+    description: Document source management and ingestion
+  - name: webhooks
+    description: Webhook endpoint management and delivery
+  - name: visitor
+    description: Public visitor chat endpoints (no auth required)
+  - name: sprint5
+    description: Sprint 5 features - conversations, embed, export, account lifecycle
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token from authentication service
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for service-to-service calls
+
+  parameters:
+    XRequestId:
+      name: X-Request-ID
+      in: header
+      description: Request ID for tracing and audit logging
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ===== Common =====
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          additionalProperties: true
+          description: Additional error context
+
+    SuccessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, success]
+
+    PaginationParams:
+      type: object
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        offset:
+          type: integer
+          minimum: 0
+          default: 0
+
+    PaginatedResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    # ===== Bot =====
+    BotConfig:
+      type: object
+      description: Bot draft configuration
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        system_prompt:
+          type: string
+          maxLength: 10000
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.7
+        max_tokens:
+          type: integer
+          minimum: 100
+          maximum: 8000
+          default: 2000
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 5
+        lead_form_enabled:
+          type: boolean
+          default: false
+        lead_form_trigger:
+          type: string
+          enum: [never, always, on_request]
+          default: on_request
+
+    BotResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        public_id:
+          type: string
+        draft_config:
+          $ref: '#/components/schemas/BotConfig'
+        draft_revision:
+          type: integer
+        active_publication_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    BotPatchRequest:
+      type: object
+      required:
+        - draft_revision
+      properties:
+        draft_revision:
+          type: integer
+        config_patch:
+          type: object
+          additionalProperties: true
+          default: {}
+
+    PublishRequest:
+      type: object
+      required:
+        - selected_document_version_ids
+      properties:
+        selected_document_version_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+
+    PublishResponse:
+      type: object
+      properties:
+        publication_id:
+          type: string
+          format: uuid
+        version:
+          type: integer
+        document_version_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    UnpublishResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [unpublished]
+
+    LeadFormField:
+      type: object
+      properties:
+        field_key:
+          type: string
+        label:
+          type: string
+        field_type:
+          type: string
+          enum: [text, email, phone, select, textarea]
+        is_required:
+          type: boolean
+        sort_order:
+          type: integer
+
+    LeadFormResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        trigger:
+          type: string
+          enum: [never, always, on_request]
+        is_required:
+          type: boolean
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeadFormField'
+
+    LeadFormFieldPatch:
+      type: object
+      required:
+        - is_required
+      properties:
+        is_required:
+          type: boolean
+
+    DomainUpsertRequest:
+      type: object
+      required:
+        - domain
+      properties:
+        domain:
+          type: string
+          pattern: '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        is_verified:
+          type: boolean
+          default: false
+
+    DomainResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        domain:
+          type: string
+        is_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    EmbedConfigResponse:
+      type: object
+      properties:
+        public_id:
+          type: string
+        company_id:
+          type: string
+          format: uuid
+        embed_model:
+          type: string
+        embed_dim:
+          type: integer
+        pinecone_index:
+          type: string
+        version:
+          type: string
+
+    ExportConfigResponse:
+      type: object
+      properties:
+        export_id:
+          type: string
+          format: uuid
+        company_id:
+          type: string
+          format: uuid
+        include:
+          type: array
+          items:
+            type: string
+        exclude:
+          type: array
+          items:
+            type: string
+
+    # ===== Sources / Ingestion =====
+    SourceCreateRequest:
+      type: object
+      required:
+        - kind
+      properties:
+        kind:
+          type: string
+          enum: [web, s3, gdrive, notion, confluence]
+        config:
+          type: object
+          additionalProperties: true
+          description: Source-specific configuration
+
+    SourceResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+        config:
+          type: object
+        status:
+          type: string
+          enum: [pending, active, error, disabled]
+        last_synced_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    IngestRequest:
+      type: object
+      required:
+        - source_id
+      properties:
+        source_id:
+          type: string
+          format: uuid
+        force_full:
+          type: boolean
+          default: false
+
+    JobResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, succeeded, dead, quota_wait]
+
+    # ===== Webhooks =====
+    WebhookCreateRequest:
+      type: object
+      required:
+        - url
+        - events
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - conversation.created
+              - conversation.updated
+              - message.created
+              - lead.captured
+              - bot.published
+              - bot.unpublished
+              - ingestion.completed
+              - ingestion.failed
+        secret:
+          type: string
+          minLength: 16
+          maxLength: 128
+          description: HMAC secret for signature verification
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+        is_active:
+          type: boolean
+          default: true
+
+    WebhookUpdateRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        secret:
+          type: string
+        headers:
+          type: object
+        is_active:
+          type: boolean
+
+    WebhookResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        company_id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        headers:
+          type: object
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    WebhookDeliveryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        webhook_endpoint_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+        payload:
+          type: object
+        attempt:
+          type: integer
+        status:
+          type: string
+          enum: [pending, delivered, failed, dead]
+        response_status:
+          type: integer
+          nullable: true
+        response_body:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        next_retry_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ===== Visitor (Public) =====
+    VisitorSessionInitRequest:
+      type: object
+      required:
+        - bot_public_id
+      properties:
+        bot_public_id:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+
+    VisitorSessionInitResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        bot_config:
+          type: object
+          properties:
+            name:
+              type: string
+            welcome_message:
+              type: string
+            lead_form_enabled:
+              type: boolean
+            lead_form_trigger:
+              type: string
+
+    VisitorChatRequest:
+      type: object
+      required:
+        - session_id
+        - message
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        message:
+          type: string
+          maxLength: 4000
+
+    SSEEvent:
+      type: object
+      description: Server-Sent Event format
+      properties:
+        event:
+          type: string
+        data:
+          type: object
+          properties:
+            type:
+              type: string
+              enum: [token, citations, done, error]
+            content:
+              type: string
+            citations:
+              type: array
+              items:
+                type: object
+            error_code:
+              type: string
+            error_message:
+              type: string
+
+    VisitorPreviewRequest:
+      type: object
+      required:
+        - bot_public_id
+        - message
+      properties:
+        bot_public_id:
+          type: string
+        message:
+          type: string
+          maxLength: 4000
+
+    # ===== Conversations (Sprint 5) =====
+    ConversationResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bot_id:
+          type: string
+          format: uuid
+        publication_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [active, closed, archived]
+        created_at:
+          type: string
+          format: date-time
+        message_count:
+          type: integer
+
+    MessageResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, completed, failed]
+        citations:
+          type: array
+          items:
+            type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ExportConversationResponse:
+      type: object
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              role:
+                type: string
+              content:
+                type: string
+              status:
+                type: string
+              citations:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    index:
+                      type: integer
+                    document_id:
+                      type: string
+                    title:
+                      type: string
+                    page:
+                      type: integer
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              document_id:
+                type: string
+              title:
+                type: string
+              page:
+                type: integer
+        export_id:
+          type: string
+          format: uuid
+
+    DeleteAccountResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [deleted]
+        deleted_count:
+          type: object
+          additionalProperties:
+            type: integer
+
+    # ===== Audit =====
+    AuditEventResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        company_id:
+          type: string
+          format: uuid
+        actor:
+          type: string
+          enum: [visitor, owner]
+        actor_id:
+          type: string
+        target_id:
+          type: string
+          nullable: true
+        target_type:
+          type: string
+        action:
+          type: string
+        request_id:
+          type: string
+          format: uuid
+        safe_metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+
+paths:
+  # ===== Bot Management =====
+  /bot:
+    get:
+      summary: Get bot configuration
+      tags: [bot]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Bot configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BotResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      summary: Update bot draft configuration
+      tags: [bot]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotPatchRequest'
+      responses:
+        '200':
+          description: Updated revision
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  draft_revision:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /bot/publish:
+    post:
+      summary: Publish bot with selected document versions
+      tags: [bot]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishRequest'
+      responses:
+        '201':
+          description: Publication created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublishResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /bot/unpublish:
+    post:
+      summary: Unpublish bot
+      tags: [bot]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Bot unpublished
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnpublishResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bot/lead-form:
+    get:
+      summary: Get lead form configuration
+      tags: [bot]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Lead form configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadFormResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bot/lead-form/fields/{field_key}:
+    patch:
+      summary: Update lead form field required status
+      tags: [bot]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: field_key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadFormFieldPatch'
+      responses:
+        '200':
+          description: Field updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bot/domains:
+    put:
+      summary: Add or update domain in allowlist
+      tags: [bot, sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DomainUpsertRequest'
+      responses:
+        '200':
+          description: Domain upserted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bot/embed:
+    get:
+      summary: Get embed configuration (public IDs only)
+      tags: [bot, sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Embed configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbedConfigResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /bot/export:
+    get:
+      summary: Get export configuration (field allowlist only)
+      tags: [bot, sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Export configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportConfigResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ===== Sources / Ingestion =====
+  /sources:
+    get:
+      summary: List document sources
+      tags: [sources]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: List of sources
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SourceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      summary: Create a new document source
+      tags: [sources]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceCreateRequest'
+      responses:
+        '201':
+          description: Source created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /sources/{source_id}:
+    get:
+      summary: Get a specific source
+      tags: [sources]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Source details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      summary: Update a source
+      tags: [sources]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceCreateRequest'
+      responses:
+        '200':
+          description: Source updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete a source
+      tags: [sources]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Source deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sources/{source_id}/ingest:
+    post:
+      summary: Trigger ingestion for a source
+      tags: [sources]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestRequest'
+      responses:
+        '202':
+          description: Ingestion job queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===== Webhooks =====
+  /webhooks:
+    get:
+      summary: List webhook endpoints
+      tags: [webhooks]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: List of webhook endpoints
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WebhookResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      summary: Create a webhook endpoint
+      tags: [webhooks]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreateRequest'
+      responses:
+        '201':
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /webhooks/{webhook_id}:
+    get:
+      summary: Get a webhook endpoint
+      tags: [webhooks]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Webhook details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      summary: Update a webhook endpoint
+      tags: [webhooks]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookUpdateRequest'
+      responses:
+        '200':
+          description: Webhook updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete a webhook endpoint
+      tags: [webhooks]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Webhook deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /webhooks/{webhook_id}/deliveries:
+    get:
+      summary: List webhook deliveries
+      tags: [webhooks]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: List of deliveries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===== Visitor (Public) =====
+  /visitor/session:
+    post:
+      summary: Initialize visitor session
+      tags: [visitor]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VisitorSessionInitRequest'
+      responses:
+        '200':
+          description: Session initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisitorSessionInitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /visitor/chat:
+    post:
+      summary: Send message to bot (SSE streaming)
+      tags: [visitor]
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VisitorChatRequest'
+      responses:
+        '200':
+          description: SSE stream of bot response
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-Sent Events stream
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /visitor/preview:
+    post:
+      summary: Preview bot response (owner only, no session needed)
+      tags: [visitor]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VisitorPreviewRequest'
+      responses:
+        '200':
+          description: Preview response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer:
+                    type: string
+                  citations:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===== Conversations (Sprint 5) =====
+  /conversations:
+    get:
+      summary: List conversations (owner-scoped)
+      tags: [sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: List of conversations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConversationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /conversations/{conversation_id}:
+    get:
+      summary: Get a single conversation
+      tags: [sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Conversation details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete a conversation
+      tags: [sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Conversation deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  conversation_id:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /conversations/{conversation_id}/export:
+    get:
+      summary: Export conversation with bounded pagination and field allowlist
+      tags: [sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Exported conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportConversationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /account:
+    delete:
+      summary: Delete account and all associated data
+      tags: [sprint5]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XRequestId'
+      responses:
+        '200':
+          description: Account deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteAccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===== Health =====
+  /health:
+    get:
+      summary: Health check endpoint
+      tags: [bot]
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded]
+                  checks:
+                    type: object
+                    additionalProperties:
+                      type: boolean
+
+responses:
+  Unauthorized:
+    description: Unauthorized - invalid or missing token
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+        example:
+          code: unauthorized
+          message: Invalid or expired token
+
+  Forbidden:
+    description: Forbidden - insufficient permissions
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+        example:
+          code: forbidden
+          message: Insufficient permissions
+
+  NotFound:
+    description: Resource not found
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+        example:
+          code: not_found
+          message: Resource not found
+
+  BadRequest:
+    description: Bad request - validation error
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+        example:
+          code: validation_error
+          message: Invalid request body
+
+  Conflict:
+    description: Conflict - resource version mismatch
+    content:
+      application/json:
+        schema:
+          $ref: '#/components/schemas/ErrorResponse'
+        example:
+          code: version_conflict
+          message: Resource was modified by another request
+
+security:
+  - BearerAuth: []

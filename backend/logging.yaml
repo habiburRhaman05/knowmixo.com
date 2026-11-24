@@ -1,0 +1,231 @@
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  json:
+    class: pythonjsonlogger.jsonlogger.JsonFormatter
+    format: '%(asctime)s %(name)s %(levelname)s %(message)s %(request_id)s %(company_id)s %(actor)s %(actor_id)s'
+    timestamp: true
+    json_ensure_ascii: false
+
+  console:
+    class: logging.Formatter
+    format: '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+  access:
+    class: logging.Formatter
+    format: '%(asctime)s | %(client_ip)s | %(method)s %(path)s | %(status_code)s | %(duration_ms).2fms | %(request_id)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+
+filters:
+  request_context:
+    class: app.logging_filters.RequestContextFilter
+  tenant_isolation:
+    class: app.logging_filters.TenantIsolationFilter
+  pii_scrubber:
+    class: app.logging_filters.PIIScrubberFilter
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: console
+    filters: [request_context, tenant_isolation, pii_scrubber]
+    stream: ext://sys.stdout
+
+  json_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filters: [request_context, tenant_isolation, pii_scrubber]
+    filename: /var/log/knowmivo/app.json.log
+    maxBytes: 10485760
+    backupCount: 10
+    encoding: utf-8
+
+  error_file:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: json
+    filters: [request_context, tenant_isolation, pii_scrubber]
+    filename: /var/log/knowmivo/error.json.log
+    maxBytes: 10485760
+    backupCount: 30
+    encoding: utf-8
+
+  audit_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: json
+    filters: [request_context, tenant_isolation]
+    filename: /var/log/knowmivo/audit.json.log
+    maxBytes: 10485760
+    backupCount: 90
+    encoding: utf-8
+
+  access_file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: access
+    filters: [request_context, tenant_isolation, pii_scrubber]
+    filename: /var/log/knowmivo/access.log
+    maxBytes: 10485760
+    backupCount: 30
+    encoding: utf-8
+
+  # Null handler for noisy libraries
+  null:
+    class: logging.NullHandler
+
+loggers:
+  # Root logger
+  root:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  # Application loggers
+  app:
+    level: DEBUG
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.api:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.auth:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.bots:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.sources:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.webhooks:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.jobs:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.audit:
+    level: INFO
+    handlers: [audit_file]
+    propagate: false
+
+  app.ingestion:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.rag:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.redis_resilience:
+    level: WARNING
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.postgres_resilience:
+    level: WARNING
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  app.job_idempotency:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  # Access logging
+  uvicorn.access:
+    level: INFO
+    handlers: [access_file]
+    propagate: false
+
+  # Third-party library noise reduction
+  urllib3:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  httpx:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  pinecone:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  langchain:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  langgraph:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  redis:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  psycopg:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  psycopg_pool:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  alembic:
+    level: INFO
+    handlers: [console, json_file]
+    propagate: false
+
+  sqlalchemy:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  watchfiles:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  multipart:
+    level: WARNING
+    handlers: [null]
+    propagate: false
+
+  # Celery (if used)
+  celery:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false
+
+  # Structlog (if used)
+  structlog:
+    level: INFO
+    handlers: [console, json_file, error_file]
+    propagate: false

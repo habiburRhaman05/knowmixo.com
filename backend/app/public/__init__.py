@@ -1,0 +1,1 @@
+"""Public visitor-facing endpoints (no owner session required)."""
