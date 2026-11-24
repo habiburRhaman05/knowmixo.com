@@ -3,13 +3,11 @@ email-validator==2.2.0  # required for pydantic EmailStr fields used throughout 
 uvicorn[standard]==0.34.2
 jinja2==3.1.6
 pydantic-settings==2.8.1
-boto3==1.37.38  # legacy import in app/aws.py; removed when Phase 2 provider adapters land
 psycopg[binary,pool]==3.2.10
 psycopg-pool==3.2.6
 pypdf==5.4.0
 python-docx==1.1.2
 httpx==0.28.1
-langgraph>=0.2,<2
 pinecone>=5,<9
 
 python-dotenv==1.0.1
@@ -25,9 +23,6 @@ pyjwt==2.9.0
 
 # Redis (native, not Upstash REST)
 redis==5.2.1
-
-# Groq LLM client
-groq==0.13.0
 
 # Migrations (SQLAlchemy used only as Alembic's connection driver, never as an ORM)
 alembic==1.14.0

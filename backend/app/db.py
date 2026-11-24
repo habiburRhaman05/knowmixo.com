@@ -29,10 +29,9 @@ def get_pool() -> ConnectionPool:
 
 def get_pg_resilience() -> PostgresResilience:
     """Get the PostgresResilience wrapper for resilient database operations."""
-    global _pg_resilience
-    if _pg_resilience is None:
-        _pg_resilience = get_pg()
-    return _pg_resilience
+    # get_pg() owns the process-wide singleton; do not cache a second copy
+    # here or reset_pg() (used by tests) would leave a stale pool behind.
+    return get_pg()
 
 
 @contextmanager

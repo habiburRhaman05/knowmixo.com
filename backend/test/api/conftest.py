@@ -38,6 +38,9 @@ def _bind_app_to_test_database(test_database_url, monkeypatch_session):
     import app.db as db_module
 
     db_module._pool = None  # built once, lazily, on first get_pool() call below
+    from app.postgres_resilience import reset_pg
+
+    reset_pg()  # connection() goes through the resilience pool; rebind it too
 
     # Never let a test send a real email. If real SMTP credentials happen
     # to be present in the environment (e.g. a shared .env), signup/

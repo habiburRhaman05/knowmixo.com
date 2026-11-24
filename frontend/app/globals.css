@@ -1,0 +1,257 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens (docs/07-UI-SPEC). Light neutral surface, dark readable text,
+   one indigo accent. Dark mode mirrors the same palette shifted. Never
+   introduce a second accent -- premium feel is one brand color, used
+   sparingly. */
+@layer base {
+  :root {
+    --background: 220 20% 99%;
+    --foreground: 224 20% 10%;
+    --subtle: 220 20% 97%;
+
+    --muted: 220 16% 94%;
+    --muted-foreground: 220 10% 42%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 224 20% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 20% 10%;
+
+    --primary: 243 75% 59%;
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 243 75% 52%;
+
+    --secondary: 224 18% 14%;
+    --secondary-foreground: 0 0% 98%;
+
+    --accent: 243 90% 97%;
+    --accent-foreground: 243 75% 40%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 160 70% 36%;
+    --success-foreground: 0 0% 98%;
+
+    --warning: 36 92% 46%;
+    --warning-foreground: 36 100% 10%;
+
+    --border: 220 16% 90%;
+    --input: 220 16% 88%;
+    --ring: 243 75% 59%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 224 24% 6%;
+    --foreground: 220 14% 96%;
+    --subtle: 224 20% 9%;
+
+    --muted: 224 16% 14%;
+    --muted-foreground: 220 10% 68%;
+
+    --card: 224 24% 8%;
+    --card-foreground: 220 14% 96%;
+
+    --popover: 224 24% 8%;
+    --popover-foreground: 220 14% 96%;
+
+    --primary: 243 85% 68%;
+    --primary-foreground: 224 24% 6%;
+    --primary-hover: 243 85% 73%;
+
+    --secondary: 220 14% 94%;
+    --secondary-foreground: 224 24% 6%;
+
+    --accent: 243 40% 20%;
+    --accent-foreground: 243 100% 90%;
+
+    --destructive: 0 65% 55%;
+    --destructive-foreground: 0 0% 98%;
+
+    --success: 160 70% 45%;
+    --success-foreground: 224 24% 6%;
+
+    --warning: 36 92% 55%;
+    --warning-foreground: 36 100% 10%;
+
+    --border: 224 16% 18%;
+    --input: 224 16% 18%;
+    --ring: 243 85% 68%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1,
+      "ss01" 1;
+  }
+
+  /* Visible focus for keyboard users, invisible for pointer users. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  button,
+  [role="button"],
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    @apply bg-primary/20 text-foreground;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Subtle animated backdrop used on marketing and auth shells. Entirely
+     CSS -- no runtime cost. */
+  .hero-grid {
+    background-image:
+      radial-gradient(
+        ellipse 80% 60% at 50% -20%,
+        hsl(var(--primary) / 0.22),
+        transparent 70%
+      ),
+      radial-gradient(
+        ellipse 60% 50% at 110% 110%,
+        hsl(var(--primary) / 0.14),
+        transparent 70%
+      ),
+      radial-gradient(circle at 1px 1px, hsl(var(--border)) 1px, transparent 0);
+    background-size:
+      auto,
+      auto,
+      28px 28px;
+  }
+
+  .mesh {
+    background:
+      radial-gradient(circle at 15% 10%, hsl(var(--primary) / 0.14), transparent 45%),
+      radial-gradient(circle at 85% 30%, hsl(260 100% 70% / 0.18), transparent 50%),
+      radial-gradient(circle at 60% 100%, hsl(220 100% 65% / 0.12), transparent 50%);
+  }
+
+  /* Noise texture layered over dark hero panels for premium depth. Uses a
+     tiny inline SVG so it ships zero extra requests. */
+  .grain {
+    position: relative;
+  }
+  .grain::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.08;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+
+  /* Soft glow for primary surfaces — brand-tinted shadow that sits just
+     under the button so hover reads as "warmer" not "bigger". */
+  .glow-primary {
+    box-shadow:
+      0 1px 0 0 rgb(255 255 255 / 0.15) inset,
+      0 6px 18px -6px hsl(var(--primary) / 0.5),
+      0 1px 2px 0 rgb(16 24 40 / 0.06);
+  }
+
+  /* Reusable premium card surface: subtle gradient top border + soft shadow. */
+  .card-surface {
+    @apply bg-card text-card-foreground border border-border rounded-xl shadow-card;
+    position: relative;
+  }
+
+  .card-surface-raised {
+    @apply card-surface;
+    box-shadow:
+      0 1px 2px 0 rgb(16 24 40 / 0.04),
+      0 2px 6px -1px rgb(16 24 40 / 0.06),
+      0 10px 24px -8px rgb(16 24 40 / 0.1);
+  }
+
+  .link-subtle {
+    @apply text-primary underline-offset-4 hover:underline focus-visible:underline;
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-muted;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/50 to-transparent dark:via-white/10;
+  }
+
+  /* Status dot with subtle outer pulse for "active" states. */
+  .dot-pulse {
+    position: relative;
+    display: inline-flex;
+  }
+  .dot-pulse::before {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    background: currentColor;
+    opacity: 0.25;
+    animation: dot-pulse-ring 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+  @keyframes dot-pulse-ring {
+    0% { transform: scale(0.8); opacity: 0.5; }
+    80%, 100% { transform: scale(1.8); opacity: 0; }
+  }
+
+  /* Elevated input — tiny internal highlight makes the field feel inset. */
+  .input-elevated {
+    box-shadow:
+      0 1px 0 0 hsl(0 0% 100% / 0.6) inset,
+      0 1px 2px 0 rgb(16 24 40 / 0.04);
+  }
+}
+
+/* Honest status colors used across every data surface (docs/07). Always paired
+   with a text label, never color-only. */
+@layer utilities {
+  .status-ready {
+    @apply text-success border-success/30 bg-success/10;
+  }
+  .status-processing {
+    @apply text-primary border-primary/30 bg-primary/10;
+  }
+  .status-waiting {
+    @apply text-warning border-warning/30 bg-warning/10;
+  }
+  .status-failed {
+    @apply text-destructive border-destructive/30 bg-destructive/10;
+  }
+  .status-idle {
+    @apply text-muted-foreground border-border bg-muted;
+  }
+}

@@ -1,390 +1,365 @@
-"""Public visitor-facing endpoints: bot config, session bootstrap, chat streaming.
+"""Public visitor endpoints (docs/16-API-ROUTES.md "Visitor bootstrap and
+chat (public)"). No owner session is accepted here: visitors authenticate
+with a short-lived, bot-scoped visitor token from the bootstrap call, and a
+visitor token is never accepted on any owner route (separate tables).
 
-No owner session required — these are the endpoints visitors hit on embedded widgets.
+Bootstrap origin validation (bot domain allowlist) supplements the token
+check; it is not proof of a human visitor (docs/06-API.md).
 """
+import hashlib
+import json
 import secrets
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncGenerator
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
+from starlette.concurrency import run_in_threadpool
 
-from app.auth.service import SessionPrincipal
-from app.bots.service import BotError
+from app.auth.service import resolve_session
+from app.chat import pipeline
+from app.chat.pipeline import ChatError
 from app.db import connection
-from app.deps import get_verified_principal
-from app.graph import chat as graph_chat
-from app.graph import search
-from app.providers.embeddings import embed_batch
-from app.aws import answer_stream
-from app.config import settings
 
-router = APIRouter(prefix="/public/v1", tags=["public"])
+router = APIRouter(prefix="/api/v1/public", tags=["public"])
+
+VISITOR_TOKEN_TTL_MINUTES = 30
+SESSION_RATE_LIMIT = 30  # bootstrap calls per IP per minute
 
 
-# --- Schemas ----------------------------------------------------------------
+def _error(status: int, code: str, message: str, headers: dict | None = None) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message}, headers=headers)
 
 
-class PublicBotConfig(BaseModel):
-    """Sanitized bot config for visitors — no internal IDs, no draft fields."""
-    public_id: str
-    name: str
-    tone: str
-    language: str
-    fallback_message: str
-    branding: dict
+def _raise_chat(exc: ChatError):
+    headers = {"Retry-After": str(exc.retry_after_seconds)} if exc.retry_after_seconds else None
+    detail = {"code": exc.code, "message": exc.message}
+    if exc.retry_after_seconds:
+        detail["retry_after_seconds"] = exc.retry_after_seconds
+    raise HTTPException(status_code=exc.status_code, detail=detail, headers=headers)
 
 
-class VisitorSessionCreate(BaseModel):
-    bot_public_id: str = Field(min_length=1)
+def _require_uuid(value: str, code: str, message: str) -> None:
+    try:
+        pipeline.require_uuid(value, code, message)
+    except ChatError as exc:
+        raise _error(404, exc.code, exc.message) from exc
 
 
-class VisitorSessionResponse(BaseModel):
-    session_token: str
-    expires_at: str
-
-
-class ChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=4000)
-    conversation_id: str | None = None
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-
-# --- Helpers ----------------------------------------------------------------
-
-
-def _hash_token(token: str) -> str:
-    import hashlib
+def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+# --- Origin allowlist -------------------------------------------------------
+
+
+def _origin_host(origin: str | None) -> str | None:
+    if not origin:
+        return None
+    parsed = urlparse(origin if "://" in origin else f"//{origin}")
+    return (parsed.hostname or "").lower() or None
+
+
+def origin_allowed(allowed_domains: list[str], origin: str | None) -> bool:
+    """No configured domains = open (owner has not restricted the bot yet).
+    Once any domain is configured, the Origin header must match one
+    exactly, or a `*.example.com` wildcard must match a subdomain."""
+    if not allowed_domains:
+        return True
+    host = _origin_host(origin)
+    if not host:
+        return False
+    for domain in allowed_domains:
+        domain = domain.lower().strip()
+        if domain.startswith("*."):
+            if host.endswith(domain[1:]) and host != domain[2:]:
+                return True
+        elif host == domain:
+            return True
+    return False
+
+
+def _check_origin(conn, bot_id: str, origin: str | None) -> None:
+    rows = conn.execute("SELECT domain FROM bot_domains WHERE bot_id = %s", (bot_id,)).fetchall()
+    if not origin_allowed([r["domain"] for r in rows], origin):
+        raise _error(403, "origin_not_allowed", "This origin is not allowed to use this assistant.")
+
+
+def _rate_limit_session_bootstrap(request: Request) -> None:
+    """Best-effort per-IP limiter. Redis outage degrades to 'allow' (the
+    RateLimiter itself also degrades), never to a 500 on the public path."""
+    try:
+        from app.redis_resilience import RateLimiter, get_redis
+
+        ip = request.client.host if request.client else "unknown"
+        allowed, _remaining = RateLimiter(get_redis(), "visitor_bootstrap").check_limit(ip, SESSION_RATE_LIMIT, 60)
+    except Exception:  # noqa: BLE001
+        return
+    if not allowed:
+        raise _error(429, "rate_limited", "Too many requests. Try again shortly.", headers={"Retry-After": "60"})
+
+
+# --- Auth -------------------------------------------------------------------
 
 
 @dataclass
 class VisitorPrincipal:
-    """Principal for visitor chat — scoped to a single bot/publication."""
-    tenant: str  # company_id
+    session_id: str
     bot_id: str
-    publication_id: str
-    groups: list[str]
-    subject: str  # visitor_session_id
+    company_id: str
 
 
-async def get_visitor_session(
-    session_token: str = Header(..., alias="X-Session-Token"),
-    db=Depends(connection),
-) -> VisitorPrincipal:
-    """Validate visitor session token and return scoped principal."""
-    token_hash = _hash_token(session_token)
-    row = db.execute(
+def _bearer(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise _error(401, "unauthenticated", "Missing visitor token.")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise _error(401, "unauthenticated", "Missing visitor token.")
+    return token
+
+
+def _lookup_visitor(conn, token: str) -> VisitorPrincipal | None:
+    row = conn.execute(
         """
-        SELECT vs.*, b.company_id, b.active_publication_id
-        FROM visitor_sessions vs
-        JOIN bots b ON b.id = vs.bot_id
+        SELECT vs.id, vs.bot_id, b.company_id
+        FROM visitor_sessions vs JOIN bots b ON b.id = vs.bot_id
         WHERE vs.session_token_hash = %s AND vs.expires_at > now()
         """,
-        (token_hash,),
+        (hash_token(token),),
     ).fetchone()
     if not row:
-        raise HTTPException(status_code=401, detail={"code": "invalid_session", "message": "Invalid or expired session token."})
-    if not row["active_publication_id"]:
-        raise HTTPException(status_code=404, detail={"code": "bot_unpublished", "message": "Bot is not published."})
-
-    return VisitorPrincipal(
-        tenant=str(row["company_id"]),
-        bot_id=str(row["bot_id"]),
-        publication_id=str(row["active_publication_id"]),
-        groups=[],  # visitor has no group membership
-        subject=str(row["id"]),
-    )
+        return None
+    return VisitorPrincipal(session_id=str(row["id"]), bot_id=str(row["bot_id"]), company_id=str(row["company_id"]))
 
 
-async def get_or_create_conversation(
-    principal: VisitorPrincipal,
-    conversation_id: str | None,
-    db=Depends(connection),
-) -> str:
-    """Get existing conversation or create new one for this visitor session."""
-    if conversation_id:
-        row = db.execute(
-            "SELECT id FROM conversations WHERE id = %s AND visitor_session_id = %s",
-            (conversation_id, principal.subject),
+def get_visitor(authorization: str | None = Header(default=None)) -> VisitorPrincipal:
+    token = _bearer(authorization)
+    with connection() as conn:
+        principal = _lookup_visitor(conn, token)
+    if not principal:
+        raise _error(401, "invalid_session", "Invalid or expired visitor token.")
+    return principal
+
+
+# --- Config + bootstrap -----------------------------------------------------
+
+
+@router.get("/bots/{public_id}/config")
+def get_public_bot_config(public_id: str, request: Request):
+    with connection() as conn:
+        bot = conn.execute(
+            """
+            SELECT b.id, p.config_snapshot
+            FROM bots b JOIN publications p ON p.id = b.active_publication_id
+            WHERE b.public_id = %s AND b.disabled_at IS NULL
+            """,
+            (public_id,),
         ).fetchone()
-        if row:
-            return str(row["id"])
-        raise HTTPException(status_code=404, detail={"code": "conversation_not_found", "message": "Conversation not found or not yours."})
-
-    # Create new conversation
-    row = db.execute(
-        """
-        INSERT INTO conversations (bot_id, publication_id, visitor_session_id)
-        VALUES (%s, %s, %s) RETURNING id
-        """,
-        (principal.bot_id, principal.publication_id, principal.subject),
-    ).fetchone()
-    return str(row["id"])
-
-
-# --- Endpoints --------------------------------------------------------------
-
-
-@router.get("/bots/{public_id}/config", response_model=PublicBotConfig)
-def get_public_bot_config(public_id: str, db=Depends(connection)):
-    """Get sanitized bot config for visitor widget initialization."""
-    bot = db.execute(
-        """
-        SELECT b.public_id, b.draft_config, p.config_snapshot
-        FROM bots b
-        LEFT JOIN publications p ON p.id = b.active_publication_id
-        WHERE b.public_id = %s AND b.active_publication_id IS NOT NULL
-        """,
-        (public_id,),
-    ).fetchone()
-    if not bot:
-        raise HTTPException(status_code=404, detail={"code": "bot_not_found", "message": "Bot not found or not published."})
-
-    # Use published snapshot if available, else draft (for preview)
-    config = bot["config_snapshot"] or bot["draft_config"]
-    return PublicBotConfig(
-        public_id=bot["public_id"],
-        name=config.get("name", "Assistant"),
-        tone=config.get("tone", "helpful"),
-        language=config.get("language", "en"),
-        fallback_message=config.get("fallback_message", "I couldn't find an answer."),
-        branding=config.get("branding", {}),
-    )
+        if not bot:
+            raise _error(404, "bot_not_found", "Assistant not found or not published.")
+        _check_origin(conn, bot["id"], request.headers.get("origin"))
+        lead_form = conn.execute(
+            "SELECT 1 FROM lead_forms WHERE bot_id = %s AND is_active", (bot["id"],)
+        ).fetchone()
+    config = bot["config_snapshot"] or {}
+    return {
+        "name": config.get("name", "Assistant"),
+        "branding": config.get("branding", {}),
+        "greeting": config.get("greeting", ""),
+        "suggestions": config.get("suggestions", []),
+        "tone": config.get("tone", "helpful"),
+        "language": config.get("language", "en"),
+        "lead_capture_enabled": bool(lead_form),
+    }
 
 
-@router.post("/bots/sessions", response_model=VisitorSessionResponse, status_code=201)
-def create_visitor_session(body: VisitorSessionCreate, db=Depends(connection)):
-    """Create a short-lived visitor session token for a published bot."""
-    bot = db.execute(
-        "SELECT id, active_publication_id FROM bots WHERE public_id = %s",
-        (body.bot_public_id,),
-    ).fetchone()
-    if not bot:
-        raise HTTPException(status_code=404, detail={"code": "bot_not_found", "message": "Bot not found."})
-    if not bot["active_publication_id"]:
-        raise HTTPException(status_code=404, detail={"code": "bot_unpublished", "message": "Bot is not published."})
-
-    session_token = secrets.token_urlsafe(32)
-    token_hash = _hash_token(session_token)
-
-    row = db.execute(
-        """
-        INSERT INTO visitor_sessions (bot_id, session_token_hash, expires_at)
-        VALUES (%s, %s, now() + interval '30 minutes')
-        RETURNING expires_at
-        """,
-        (bot["id"], token_hash),
-    ).fetchone()
-
-    return VisitorSessionResponse(
-        session_token=session_token,
-        expires_at=row["expires_at"].isoformat(),
-    )
+@router.post("/bots/{public_id}/sessions", status_code=201)
+def create_visitor_session(public_id: str, request: Request):
+    _rate_limit_session_bootstrap(request)
+    token = secrets.token_urlsafe(32)
+    with connection() as conn:
+        bot = conn.execute(
+            "SELECT id, active_publication_id FROM bots WHERE public_id = %s AND disabled_at IS NULL", (public_id,)
+        ).fetchone()
+        if not bot or not bot["active_publication_id"]:
+            raise _error(404, "bot_not_found", "Assistant not found or not published.")
+        _check_origin(conn, bot["id"], request.headers.get("origin"))
+        row = conn.execute(
+            """
+            INSERT INTO visitor_sessions (bot_id, session_token_hash, expires_at)
+            VALUES (%s, %s, now() + make_interval(mins => %s)) RETURNING expires_at
+            """,
+            (bot["id"], hash_token(token), VISITOR_TOKEN_TTL_MINUTES),
+        ).fetchone()
+    return {"visitor_token": token, "expires_at": row["expires_at"].isoformat()}
 
 
-@router.post("/chat", response_model=None)
-async def visitor_chat(
-    body: ChatRequest,
-    principal: VisitorPrincipal = Depends(get_visitor_session),
-    conversation_id: str = Depends(get_or_create_conversation),
-    db=Depends(connection),
+# --- Conversations + chat ---------------------------------------------------
+
+
+@router.post("/conversations", status_code=201)
+def create_conversation(visitor: VisitorPrincipal = Depends(get_visitor)):
+    with connection() as conn:
+        bot = conn.execute("SELECT active_publication_id FROM bots WHERE id = %s", (visitor.bot_id,)).fetchone()
+        if not bot or not bot["active_publication_id"]:
+            raise _error(404, "bot_unpublished", "This assistant is not currently published.")
+        row = conn.execute(
+            "INSERT INTO conversations (bot_id, publication_id, visitor_session_id) VALUES (%s, %s, %s) RETURNING id",
+            (visitor.bot_id, bot["active_publication_id"], visitor.session_id),
+        ).fetchone()
+        conversation_id = str(row["id"])
+        conn.execute(
+            "INSERT INTO analytics_events (company_id, bot_id, conversation_id, event_type) VALUES (%s, %s, %s, 'conversation_started')",
+            (visitor.company_id, visitor.bot_id, conversation_id),
+        )
+    return {"conversation_id": conversation_id}
+
+
+class MessageRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=pipeline.MAX_MESSAGE_CHARS)
+
+
+@router.post("/conversations/{conversation_id}/messages", response_model=None)
+async def send_message(
+    conversation_id: str,
+    body: MessageRequest,
+    visitor: VisitorPrincipal = Depends(get_visitor),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    """Stream a grounded chat response (SSE)."""
-    s = settings()
+    """Streams the grounded answer as SSE. Scope (which sources may be
+    searched) is derived from the bot's active publication, never from the
+    request. Replaying an Idempotency-Key returns the stored answer."""
+    def _prepare():
+        with connection() as conn:
+            scope = pipeline.visitor_scope(conn, visitor.session_id, conversation_id)
+        return pipeline.prepare_turn(scope, body.text, idempotency_key)
 
-    # Save user message
-    user_msg = db.execute(
-        """
-        INSERT INTO messages (conversation_id, role, content, status)
-        VALUES (%s, 'user', %s, 'completed') RETURNING id
-        """,
-        (conversation_id, body.question),
-    ).fetchone()
-    user_message_id = str(user_msg["id"])
+    try:
+        turn = await run_in_threadpool(_prepare)
+    except ChatError as exc:
+        _raise_chat(exc)
+    if turn.replay:
+        return pipeline.sse_response(pipeline.replay_stream(turn))
+    return pipeline.sse_response(pipeline.stream_turn(turn))
 
-    # Create assistant message placeholder (streaming)
-    assistant_msg = db.execute(
-        """
-        INSERT INTO messages (conversation_id, role, content, status, generation_id)
-        VALUES (%s, 'assistant', '', 'streaming', gen_random_uuid()) RETURNING id, generation_id
-        """,
-        (conversation_id,),
-    ).fetchone()
-    assistant_message_id = str(assistant_msg["id"])
-    generation_id = str(assistant_msg["generation_id"])
 
-    # Fetch conversation history for context
-    history_rows = db.execute(
-        "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY created_at ASC",
-        (conversation_id,),
-    ).fetchall()
-    history = [{"role": r["role"], "content": r["content"]} for r in history_rows[:-1]]  # exclude current user message
+# --- Lead capture (V1: skippable, post-hoc) ---------------------------------
 
-    # Build retrieval query with conversation context
-    query = body.question
-    if history:
-        prior_user = [m["content"] for m in history if m["role"] == "user"]
-        if prior_user:
-            query = prior_user[-1] + "\nFollow-up: " + body.question
 
-    # Embed query
-    query_vector = embed_batch([query])[0]
+class LeadRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    email: EmailStr | None = None
+    consent: bool
 
-    # Retrieve from Pinecone (filtered by company + publication's source versions)
-    # Get publication's source version IDs for authorization
-    pub_versions = db.execute(
-        "SELECT document_version_id FROM publication_sources WHERE publication_id = %s",
-        (principal.publication_id,),
-    ).fetchall()
-    allowed_version_ids = {str(r["document_version_id"]) for r in pub_versions}
 
-    hits = search(principal.tenant, query_vector, principal.groups, principal.subject)
-    # Filter to only chunks from allowed versions
-    hits = [h for h in hits if h["metadata"].get("version_id") in allowed_version_ids]
-    hits = [h for h in hits if h["score"] >= s.min_relevance]
+@router.post("/conversations/{conversation_id}/lead", status_code=201)
+def submit_lead(conversation_id: str, body: LeadRequest, visitor: VisitorPrincipal = Depends(get_visitor)):
+    _require_uuid(conversation_id, "conversation_not_found", "Conversation not found.")
+    if body.consent is not True:
+        raise _error(422, "consent_required", "Consent is required to submit contact details.")
+    values = {k: v for k, v in {"name": body.name, "email": body.email}.items() if v}
+    if not values:
+        raise _error(422, "empty_lead", "Provide a name or an email, or skip the form.")
 
-    # Build sources for response
-    sources = [
-        {
-            "index": i + 1,
-            "document_id": h["metadata"].get("document_id", ""),
-            "title": h["metadata"].get("title", ""),
-            "page": h["metadata"].get("page", 1),
-            "excerpt": h["metadata"].get("text", "")[:320],
-        }
-        for i, h in enumerate(hits)
-    ]
-
-    # Build evidence text for LLM
-    evidence = "\n\n".join(
-        f"[{i+1}] {h['metadata'].get('title', 'Document')}, page {h['metadata'].get('page', 1)}: {h['metadata'].get('text', '')}"
-        for i, h in enumerate(hits)
-    )
-
-    # Generate answer via LLM (streaming)
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        full_answer = ""
-        citation_indices = []
-
-        try:
-            async for chunk in answer_stream(body.question, evidence, history):
-                full_answer += chunk
-                yield f"data: {chunk}\n\n"
-
-            # Mark message completed
-            db.execute(
-                "UPDATE messages SET content = %s, status = 'completed', citations = %s WHERE id = %s",
-                (full_answer, {"sources": sources}, assistant_message_id),
+    with connection() as conn:
+        conv = conn.execute(
+            "SELECT id FROM conversations WHERE id = %s AND visitor_session_id = %s AND NOT is_preview",
+            (conversation_id, visitor.session_id),
+        ).fetchone()
+        if not conv:
+            raise _error(404, "conversation_not_found", "Conversation not found.")
+        form = conn.execute(
+            "SELECT id FROM lead_forms WHERE bot_id = %s AND is_active ORDER BY created_at ASC LIMIT 1", (visitor.bot_id,)
+        ).fetchone()
+        if not form:
+            raise _error(404, "no_lead_form", "Lead capture is not enabled for this assistant.")
+        required = conn.execute(
+            "SELECT field_key FROM lead_form_fields WHERE lead_form_id = %s AND is_required", (form["id"],)
+        ).fetchall()
+        missing = [r["field_key"] for r in required if r["field_key"] not in values]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "required_fields_missing", "message": "Required fields are missing.", "fields": missing},
             )
-            db.commit()
-
-            yield f"event: done\ndata: {assistant_message_id}\n\n"
-
-        except Exception as exc:
-            db.execute(
-                "UPDATE messages SET status = 'failed' WHERE id = %s",
-                (assistant_message_id,),
-            )
-            db.commit()
-            yield f"event: error\ndata: {exc}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-# --- Owner preview endpoint (authenticated, uses same pipeline) -------------
-
-
-class OwnerPreviewRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=4000)
-    conversation_id: str | None = None
-
-
-@router.post("/owner/chat/preview", response_model=None)
-async def owner_chat_preview(
-    body: OwnerPreviewRequest,
-    principal: SessionPrincipal = Depends(get_verified_principal),
-    db=Depends(connection),
-):
-    """Owner draft preview — same pipeline but against bot's draft config and all ready sources."""
-    company_id = principal.company_id
-    if not company_id:
-        raise HTTPException(status_code=404, detail={"code": "no_company", "message": "No company found."})
-
-    bot = db.execute(
-        "SELECT id, draft_config, active_publication_id FROM bots WHERE company_id = %s",
-        (company_id,),
-    ).fetchone()
-    if not bot:
-        raise HTTPException(status_code=404, detail={"code": "no_bot", "message": "No bot found for this company."})
-
-    # For preview, use all ready document versions in this company
-    ready_versions = db.execute(
-        """
-        SELECT dv.id FROM document_versions dv
-        JOIN documents d ON d.id = dv.document_id
-        WHERE d.company_id = %s AND dv.status = 'ready'
-        """,
-        (company_id,),
-    ).fetchall()
-    allowed_version_ids = {str(r["id"]) for r in ready_versions}
-
-    if not allowed_version_ids:
-        # No ready sources yet — return empty evidence response
-        async def empty_gen():
-            yield "data: I don't have any ready sources to answer from yet.\n\n"
-            yield "event: done\ndata: \n\n"
-        return StreamingResponse(empty_gen(), media_type="text/event-stream")
-
-    # Get or create preview conversation (separate from visitor sessions)
-    conv_id = body.conversation_id
-    if conv_id:
-        row = db.execute(
-            "SELECT id FROM conversations WHERE id = %s AND bot_id = %s AND visitor_session_id IS NULL",
-            (conv_id, bot["id"]),
+        row = conn.execute(
+            """
+            INSERT INTO leads (conversation_id, lead_form_id, "values", consent_at)
+            VALUES (%s, %s, %s::jsonb, now())
+            ON CONFLICT (conversation_id) DO NOTHING RETURNING id
+            """,
+            (conversation_id, form["id"], json.dumps(values)),
         ).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail={"code": "conversation_not_found", "message": "Preview conversation not found."})
-        conv_id = str(row["id"])
-    else:
-        row = db.execute(
-            "INSERT INTO conversations (bot_id, publication_id, visitor_session_id) VALUES (%s, %s, NULL) RETURNING id",
-            (bot["id"], bot["active_publication_id"] or "00000000-0000-0000-0000-000000000000"),  # will fix
-        ).fetchone()
-        # Actually for preview we need a different approach - let's use a special flag
-        # For now, create with a NULL publication_id for preview
-        pass
+            raise _error(409, "lead_already_submitted", "Contact details were already submitted for this conversation.")
+        conn.execute(
+            "INSERT INTO analytics_events (company_id, bot_id, conversation_id, event_type) VALUES (%s, %s, %s, 'lead_submitted')",
+            (visitor.company_id, visitor.bot_id, conversation_id),
+        )
+    return {"status": "submitted"}
 
-    # This is getting complex — let's simplify and use the existing graph.chat
-    # which already handles the full pipeline
 
-    history = []
-    if conv_id:
-        history_rows = db.execute(
-            "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY created_at ASC",
-            (conv_id,),
-        ).fetchall()
-        history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+# --- Feedback ---------------------------------------------------------------
 
-    # Use the graph directly with a custom principal that has all ready versions
-    # For now, return a simplified response
-    async def preview_gen():
-        yield "data: Owner preview not fully implemented yet.\n\n"
-        yield "event: done\ndata: \n\n"
 
-    return StreamingResponse(preview_gen(), media_type="text/event-stream")
+class FeedbackRequest(BaseModel):
+    rating: int
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+@router.post("/messages/{message_id}/feedback", status_code=201)
+def submit_feedback(message_id: str, body: FeedbackRequest, authorization: str | None = Header(default=None)):
+    """Accepts a visitor token OR an owner session. The message must sit in
+    the caller's own authorised scope; anything else is a 404 (never a 403
+    that would confirm the message exists)."""
+    token = _bearer(authorization)  # authenticate-before-anything: 401 outranks 404/422
+    _require_uuid(message_id, "message_not_found", "Message not found.")
+    if body.rating not in (-1, 1):
+        raise _error(422, "invalid_rating", "Rating must be 1 (helpful) or -1 (not helpful).")
+
+    with connection() as conn:
+        visitor = _lookup_visitor(conn, token)
+        if visitor:
+            actor, actor_id, company_id, bot_id = "visitor", visitor.session_id, visitor.company_id, visitor.bot_id
+            msg = conn.execute(
+                """
+                SELECT m.id, m.conversation_id FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                WHERE m.id = %s AND m.role = 'assistant' AND c.visitor_session_id = %s
+                """,
+                (message_id, visitor.session_id),
+            ).fetchone()
+        else:
+            principal = resolve_session(conn, token)
+            if not principal or not principal.company_id:
+                raise _error(401, "invalid_session", "Invalid or expired token.")
+            actor, actor_id, company_id = "owner", principal.user_id, principal.company_id
+            msg = conn.execute(
+                """
+                SELECT m.id, m.conversation_id, c.bot_id FROM messages m
+                JOIN conversations c ON c.id = m.conversation_id
+                JOIN bots b ON b.id = c.bot_id
+                WHERE m.id = %s AND m.role = 'assistant' AND b.company_id = %s
+                """,
+                (message_id, company_id),
+            ).fetchone()
+            bot_id = str(msg["bot_id"]) if msg else None
+        if not msg:
+            raise _error(404, "message_not_found", "Message not found.")
+
+        conn.execute(
+            """
+            INSERT INTO feedback (message_id, actor, actor_id, rating, comment)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (message_id, actor, actor_id) DO UPDATE SET rating = EXCLUDED.rating, comment = EXCLUDED.comment
+            """,
+            (message_id, actor, actor_id, body.rating, body.comment),
+        )
+        conn.execute(
+            """
+            INSERT INTO analytics_events (company_id, bot_id, conversation_id, message_id, event_type, properties)
+            VALUES (%s, %s, %s, %s, 'feedback_given', %s::jsonb)
+            """,
+            (company_id, bot_id, msg["conversation_id"], message_id, json.dumps({"rating": body.rating, "actor": actor})),
+        )
+    return {"status": "recorded"}

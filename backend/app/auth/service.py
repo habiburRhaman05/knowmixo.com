@@ -408,14 +408,19 @@ def confirm_email_change(conn, token: str) -> None:
 # --- Account deletion ---------------------------------------------------
 
 
-def delete_account(conn, user_id: str, current_password: str | None) -> None:
-    """Phase 1 scope: immediate session revocation and company soft-delete,
-    matching the identity/tenancy tables that exist today. There are no
-    documents/bots/publications/vectors yet (Phase 2-4), so the "tracked
-    storage/vector cleanup" half of docs/15-USER-STORIES.md B3 has nothing
-    to clean up until those tables exist -- it is wired into the job
-    runner in Phase 7, not stubbed out here."""
+def delete_account(conn, user_id: str, current_password: str | None) -> str | None:
+    """Immediate revocation + tracked async cleanup (docs/15 B3, docs/16
+    DELETE /me). Inside this one transaction: every session is revoked, the
+    company is soft-deleted, the bot is unpublished and disabled and every
+    source is marked deleted -- so no visitor or owner path can reach the
+    data from this moment. A `company_cleanup` job then removes vectors and
+    hard-deletes tenant rows. Returns that job's id (None if the user had no
+    company)."""
     require_reauthentication(conn, user_id, current_password)
+
+    company = conn.execute(
+        "SELECT id FROM companies WHERE owner_user_id = %s AND deleted_at IS NULL", (user_id,)
+    ).fetchone()
 
     revoke_all_sessions(conn, user_id)
     conn.execute(
@@ -426,3 +431,19 @@ def delete_account(conn, user_id: str, current_password: str | None) -> None:
         "UPDATE users SET disabled_at = now(), updated_at = now() WHERE id = %s",
         (user_id,),
     )
+    if not company:
+        return None
+
+    company_id = str(company["id"])
+    conn.execute(
+        "UPDATE bots SET active_publication_id = NULL, disabled_at = now(), updated_at = now() WHERE company_id = %s",
+        (company_id,),
+    )
+    conn.execute(
+        "UPDATE documents SET deleted_at = now(), updated_at = now() WHERE company_id = %s AND deleted_at IS NULL",
+        (company_id,),
+    )
+    from app.jobs.queue import enqueue_job
+
+    job_id, _is_new = enqueue_job(conn, company_id, kind="company_cleanup", idempotency_key=f"company_cleanup:{company_id}")
+    return job_id

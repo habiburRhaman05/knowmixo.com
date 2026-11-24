@@ -91,3 +91,34 @@ def delete_version_vectors(company_id: str, version_id: str) -> None:
         _index().delete(filter={"version_id": {"$eq": version_id}}, namespace=company_id)
     except Exception as exc:  # noqa: BLE001
         raise TransientJobError("vector_delete_failed", stage="cleanup") from exc
+
+
+def query_chunks(company_id: str, vector: list[float], version_ids: list[str], top_k: int = 5) -> list[dict]:
+    """Similarity search restricted to the caller's own namespace AND to an
+    explicit set of authorised source versions. Returns [{"id", "score"}].
+    Hits are candidates only: the chat pipeline re-validates each against
+    Postgres before using its text (docs/03-TRD.md "validate")."""
+    if not version_ids:
+        return []
+    result = _index().query(
+        vector=vector,
+        top_k=top_k,
+        namespace=company_id,
+        filter={"version_id": {"$in": list(version_ids)}},
+        include_metadata=False,
+    )
+    return [{"id": m.id, "score": float(m.score)} for m in (getattr(result, "matches", None) or [])]
+
+
+def ping() -> bool:
+    """Cheap reachability check for /health/ready (never a paid call)."""
+    _index().describe_index_stats()
+    return True
+
+
+def delete_company_vectors(company_id: str) -> None:
+    """Drops the whole per-company namespace (account deletion cleanup)."""
+    try:
+        _index().delete(delete_all=True, namespace=company_id)
+    except Exception as exc:  # noqa: BLE001
+        raise TransientJobError("vector_namespace_delete_failed", stage="cleanup") from exc

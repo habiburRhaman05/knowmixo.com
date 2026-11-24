@@ -6,61 +6,66 @@ tenant isolation, and safe_metadata allowlist.
 import json
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 from app.db import connection
 
 
-class AuditContext:
-    """Thread-local audit context for request_id propagation."""
+_STATE: ContextVar[dict | None] = ContextVar("audit_state", default=None)
 
-    def __init__(self):
-        self._request_id: Optional[str] = None
-        self._company_id: Optional[str] = None
-        self._actor: Optional[str] = None  # 'visitor' or 'owner'
-        self._actor_id: Optional[str] = None
+
+class AuditContext:
+    """Per-request audit state held in a ContextVar, so concurrent requests
+    (each handled in its own copied context/thread) can never see each
+    other's actor, company or request_id."""
+
+    def _state(self) -> dict:
+        state = _STATE.get()
+        if state is None:
+            state = {}
+            _STATE.set(state)
+        return state
 
     @property
     def request_id(self) -> str:
-        if self._request_id is None:
-            self._request_id = str(uuid.uuid4())
-        return self._request_id
+        state = self._state()
+        if state.get("request_id") is None:
+            state["request_id"] = str(uuid.uuid4())
+        return state["request_id"]
 
     @request_id.setter
     def request_id(self, value: str):
-        self._request_id = value
+        self._state()["request_id"] = value
 
     @property
     def company_id(self) -> Optional[str]:
-        return self._company_id
+        return self._state().get("company_id")
 
     @company_id.setter
     def company_id(self, value: str):
-        self._company_id = value
+        self._state()["company_id"] = value
 
     @property
     def actor(self) -> Optional[str]:
-        return self._actor
+        return self._state().get("actor")
 
     @actor.setter
     def actor(self, value: str):
-        if value not in ('visitor', 'owner'):
+        if value not in ("visitor", "owner"):
             raise ValueError("actor must be 'visitor' or 'owner'")
-        self._actor = value
+        self._state()["actor"] = value
 
     @property
     def actor_id(self) -> Optional[str]:
-        return self._actor_id
+        return self._state().get("actor_id")
 
     @actor_id.setter
     def actor_id(self, value: str):
-        self._actor_id = value
+        self._state()["actor_id"] = value
 
     def clear(self):
-        self._request_id = None
-        self._company_id = None
-        self._actor = None
-        self._actor_id = None
+        _STATE.set({})
 
 
 audit_context = AuditContext()
@@ -68,12 +73,9 @@ audit_context = AuditContext()
 
 @contextmanager
 def audit_request_context(request_id: str, company_id: str, actor: str, actor_id: str):
-    """Context manager to set audit context for a request."""
-    old_request_id = audit_context._request_id
-    old_company_id = audit_context._company_id
-    old_actor = audit_context._actor
-    old_actor_id = audit_context._actor_id
-
+    """Sets a FRESH audit state for the duration of the block and restores
+    the previous one afterwards."""
+    token = _STATE.set({})
     try:
         audit_context.request_id = request_id
         audit_context.company_id = company_id
@@ -81,10 +83,7 @@ def audit_request_context(request_id: str, company_id: str, actor: str, actor_id
         audit_context.actor_id = actor_id
         yield
     finally:
-        audit_context._request_id = old_request_id
-        audit_context._company_id = old_company_id
-        audit_context._actor = old_actor
-        audit_context._actor_id = old_actor_id
+        _STATE.reset(token)
 
 
 def write_audit_event(

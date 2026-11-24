@@ -93,13 +93,18 @@ def delete_account(body: DeleteAccountRequest, principal: SessionPrincipal = Dep
         raise HTTPException(status_code=400, detail={"code": "confirmation_required", "message": "Set confirm=true to delete your account."})
     try:
         with connection() as conn:
-            service.delete_account(conn, principal.user_id, body.current_password)
+            job_id = service.delete_account(conn, principal.user_id, body.current_password)
     except AuthError as exc:
         _raise(exc)
     return {
         "status": "deleted",
-        "note": "Sessions and company access revoked immediately. No stored documents/vectors exist yet in this phase -- cleanup tracking activates once Phase 3+ data exists.",
+        "cleanup_job_id": job_id,
+        "cleanup_status_url": f"/api/v1/jobs/{job_id}" if job_id else None,
+        "note": "Sessions and public access were revoked immediately; vector and data cleanup runs as a background job.",
     }
+
+
+_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_./-]*$"  # opaque storage key; no leading slash
 
 
 class CompanyPatch(BaseModel):
@@ -107,6 +112,7 @@ class CompanyPatch(BaseModel):
     website: str | None = None
     industry: str | None = None
     contact: str | None = None
+    logo_key: str | None = Field(default=None, max_length=200, pattern=_KEY_PATTERN)
 
 
 @router.get("/company")
@@ -147,3 +153,72 @@ def patch_company(body: CompanyPatch, principal: SessionPrincipal = Depends(get_
     if not row:
         raise HTTPException(status_code=404, detail={"code": "no_company", "message": "No company found."})
     return {"status": "updated"}
+
+
+class MePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    avatar_key: str | None = Field(default=None, max_length=200, pattern=_KEY_PATTERN)
+
+
+@router.patch("/me")
+def patch_me(body: MePatch, principal: SessionPrincipal = Depends(get_current_principal)):
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not fields:
+        return {"status": "no_changes"}
+    if ".." in (fields.get("avatar_key") or ""):
+        raise HTTPException(status_code=422, detail={"code": "invalid_avatar_key", "message": "Invalid avatar key."})
+    set_clause = ", ".join(f"{key} = %s" for key in fields)
+    with connection() as conn:
+        conn.execute(
+            f"UPDATE users SET {set_clause}, updated_at = now() WHERE id = %s",
+            (*fields.values(), principal.user_id),
+        )
+    return {"status": "updated"}
+
+
+class CompanyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    industry: str | None = None
+    website: str | None = None
+
+
+@router.post("/company", status_code=201)
+def create_company(body: CompanyCreate, principal: SessionPrincipal = Depends(get_current_principal)):
+    """V1: exactly one company per owner, auto-provisioned at signup. A
+    second create is a 409 rather than a silent duplicate."""
+    with connection() as conn:
+        if get_company_for_owner(conn, principal.user_id):
+            raise HTTPException(status_code=409, detail={"code": "company_exists", "message": "A company already exists for this account."})
+        company = conn.execute(
+            "INSERT INTO companies (owner_user_id, name, industry, website) VALUES (%s, %s, %s, %s) RETURNING id",
+            (principal.user_id, body.name, body.industry, body.website),
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO memberships (company_id, user_id, role) VALUES (%s, %s, 'owner')",
+            (company["id"], principal.user_id),
+        )
+    return {"id": str(company["id"])}
+
+
+@router.get("/company/export")
+def export_company(principal: SessionPrincipal = Depends(get_current_principal)):
+    """Owner data export. Built from explicit field allowlists in
+    app/bots/history.py, so provider keys / webhook secrets / internal ids
+    are excluded by construction."""
+    from fastapi.responses import Response
+
+    from app.bots import history
+    from app.bots.service import BotError
+
+    if not principal.company_id:
+        raise HTTPException(status_code=404, detail={"code": "no_company", "message": "No company found."})
+    try:
+        with connection() as conn:
+            payload = history.company_export(conn, principal.company_id)
+    except BotError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message})
+    return Response(
+        content=history.export_json_bytes(payload),
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="company-export.json"'},
+    )

@@ -28,11 +28,6 @@ def create_pool() -> ConnectionPool:
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
 
-    if database_url.startswith("postgresql://"):
-        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
-    elif database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql+psycopg://", 1)
-
     return ConnectionPool(
         database_url,
         min_size=1,
@@ -94,7 +89,7 @@ def purge_old_leads(pool: ConnectionPool, days: int = 30, dry_run: bool = False)
 
     with pool.connection() as conn:
         count = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE created_at < %s",
+            "SELECT COUNT(*) FROM leads WHERE submitted_at < %s",
             (cutoff,),
         ).fetchone()[0]
 
@@ -107,7 +102,7 @@ def purge_old_leads(pool: ConnectionPool, days: int = 30, dry_run: bool = False)
             return 0
 
         deleted = conn.execute(
-            "DELETE FROM leads WHERE created_at < %s RETURNING id",
+            "DELETE FROM leads WHERE submitted_at < %s RETURNING id",
             (cutoff,),
         ).rowcount
 
@@ -153,9 +148,6 @@ def purge_orphaned_artifacts(pool: ConnectionPool, hours: int = 24, dry_run: boo
             SELECT COUNT(*) FROM documents d
             WHERE d.created_at < %s
               AND NOT EXISTS (
-                  SELECT 1 FROM sources s WHERE s.document_id = d.id
-              )
-              AND NOT EXISTS (
                   SELECT 1 FROM document_versions dv WHERE dv.document_id = d.id
               )
             """,
@@ -174,9 +166,6 @@ def purge_orphaned_artifacts(pool: ConnectionPool, hours: int = 24, dry_run: boo
             """
             DELETE FROM documents
             WHERE created_at < %s
-              AND NOT EXISTS (
-                  SELECT 1 FROM sources s WHERE s.document_id = documents.id
-              )
               AND NOT EXISTS (
                   SELECT 1 FROM document_versions dv WHERE dv.document_id = documents.id
               )

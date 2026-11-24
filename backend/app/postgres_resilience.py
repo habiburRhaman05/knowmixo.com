@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional, TypeVar
 
 import psycopg
 from psycopg import OperationalError, InterfaceError
+from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
@@ -63,17 +64,15 @@ class PostgresResilience:
         if not url:
             raise RuntimeError("DATABASE_URL is missing")
 
-        # Convert to psycopg3 dialect if needed
-        if url.startswith("postgresql://"):
-            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
-        elif url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql+psycopg://", 1)
-
+        # psycopg3 consumes plain libpq URLs. The "postgresql+psycopg://"
+        # form is a SQLAlchemy dialect and is rejected by libpq, so never
+        # rewrite the scheme here (alembic/env.py handles that for itself).
         pool = ConnectionPool(
             conninfo=url,
             min_size=1,
             max_size=10,
             kwargs={
+                "row_factory": dict_row,  # all call sites use row["col"]
                 "autocommit": False,
                 "connect_timeout": PG_CONNECT_TIMEOUT,
                 "application_name": "knowmivo-backend",
