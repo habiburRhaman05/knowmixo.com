@@ -587,12 +587,12 @@ function PublishHint({ botPublished }: { botPublished: boolean }) {
         <div className="flex items-center gap-2">
           <Button asChild variant="secondary">
             <a href="/knowledge">
-              <Globe className="h-4 w-4" /> Pick sources
+              <Globe className="h-4 w-4" /> Manage sources
             </a>
           </Button>
           <Button asChild>
             <a href="/chatbot/publish">
-              <Rocket className="h-4 w-4" /> Publish
+              <Rocket className="h-4 w-4" /> Pick sources &amp; publish
             </a>
           </Button>
         </div>

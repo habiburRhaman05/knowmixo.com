@@ -94,6 +94,12 @@ def run_ingestion(
     provider adapters on any failure; the executor's caller (loop.py)
     handles those by requeuing/dead-lettering the job."""
     blocks = _extract_blocks(document)
+    # PDFs (and some DOCX) routinely yield NUL characters; Postgres text
+    # columns reject them outright, which failed the whole job on every retry.
+    blocks = [
+        {k: (v.replace("\x00", "") if isinstance(v, str) else v) for k, v in block.items()}
+        for block in blocks
+    ]
     heartbeat()
 
     language = detect_language(" ".join(b.get("text", "") for b in blocks[:20]))
@@ -127,6 +133,10 @@ def run_ingestion(
             }
         )
 
+    # A retry after a failure past this point (e.g. at upsert) must not trip
+    # chunks_version_ordinal_unique on the rows its previous attempt left
+    # behind -- that made every retry of such a job fail permanently.
+    conn.execute("DELETE FROM chunks WHERE version_id = %s", (document_version["id"],))
     for row in chunk_rows:
         conn.execute(
             """
