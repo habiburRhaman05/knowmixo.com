@@ -16,7 +16,7 @@ from pathlib import Path
 
 from app.config import settings
 
-ALLOWED_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
+ALLOWED_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".csv"}
 GRANT_TTL_SECONDS = 300
 
 # In-memory grant registry: scoped-upload metadata keyed by grant_id. This
@@ -44,7 +44,7 @@ def _base_dir() -> Path:
 def create_upload_grant(company_id: str, document_id: str, version: int, filename: str, size_bytes: int) -> dict:
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
-        raise UploadError("unsupported_file_type", "Allowed types: PDF, DOCX, TXT, MD.")
+        raise UploadError("unsupported_file_type", "Allowed types: PDF, DOCX, TXT, MD, CSV.")
     if size_bytes <= 0 or size_bytes > settings().max_file_bytes:
         raise UploadError("file_too_large", f"File must be between 1 byte and {settings().max_file_bytes} bytes.")
 
@@ -137,6 +137,6 @@ def _signature_matches(suffix: str, head: bytes) -> bool:
         return head.startswith(b"%PDF")
     if suffix == ".docx":
         return head.startswith(b"PK\x03\x04")  # DOCX is a zip archive
-    if suffix in (".txt", ".md"):
+    if suffix in (".txt", ".md", ".csv"):
         return True  # no reliable magic bytes for plain text
     return False

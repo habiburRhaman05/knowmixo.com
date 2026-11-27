@@ -50,3 +50,12 @@ def send_email_change_confirmation(to: str, token: str) -> None:
         subject="Confirm your new Knowmivo email address",
         body=f"Confirm this address as your new Knowmivo login email:\n\n{link}\n\nThis link expires in 24 hours.",
     )
+
+
+def send_invite_email(to: str, token: str, company_name: str, role: str) -> None:
+    link = f"{settings().public_app_url}/accept-invite?token={token}"
+    send_email(
+        to=to,
+        subject=f"You've been invited to join {company_name} on Knowmivo",
+        body=f"You've been invited to join {company_name} as a {role}.\n\nAccept the invite:\n\n{link}\n\nThis link expires in 7 days.",
+    )

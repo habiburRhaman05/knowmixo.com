@@ -70,6 +70,18 @@ def main() -> int:
             failed += 1
             print(f"FAIL  {name:<22} {type(exc).__name__}")
     print("ALL PASS" if not failed else f"{failed} FAILED")
+
+    # One-shot CLI: close the Postgres pool ourselves. Otherwise the
+    # interpreter's own shutdown GC runs ConnectionPool.__del__, which on
+    # Python 3.13+ tries to join a background thread during finalization
+    # and raises a harmless-but-alarming PythonFinalizationError.
+    try:
+        from app.postgres_resilience import reset_pg
+
+        reset_pg()
+    except Exception:  # noqa: BLE001 - never let cleanup mask the real result
+        pass
+
     return 1 if failed else 0
 
 

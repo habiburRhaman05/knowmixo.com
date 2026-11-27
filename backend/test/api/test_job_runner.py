@@ -8,6 +8,7 @@ Requires TEST_DATABASE_URL pointed at a disposable, migrated database
 import uuid
 
 import psycopg
+import pytest
 from psycopg.rows import dict_row
 
 from app.jobs.queue import enqueue_job
@@ -21,6 +22,24 @@ from app.jobs.runner import (
     heartbeat,
     replay_dead_job,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_job_queue(test_database_url):
+    """This suite's assertions (claim returns exactly the job I just
+    enqueued / returns None when idle / SKIP LOCKED means a second
+    connection sees nothing claimable) all require a quiescent jobs
+    table -- which is what this module's docstring already promises
+    ("a disposable ... database"). But other test files in the same
+    session (e.g. document ingestion via the real HTTP API) commit real
+    `jobs` rows on a different, already-committed connection that the
+    `db_conn` fixture's rollback can never undo. Wipe the queue before
+    every test here so job_runner's own semantics are what's under test,
+    not leftover rows from sibling test files."""
+    with psycopg.connect(test_database_url, autocommit=True) as conn:
+        conn.execute("DELETE FROM job_attempts")
+        conn.execute("DELETE FROM jobs")
+    yield
 
 
 def _make_company(conn) -> str:
@@ -37,8 +56,8 @@ def _make_company(conn) -> str:
 
 def test_enqueue_is_idempotent_by_key(db_conn):
     company_id = _make_company(db_conn)
-    job_id_1 = enqueue_job(db_conn, company_id, kind="noop_test", idempotency_key="fixed-key-1")
-    job_id_2 = enqueue_job(db_conn, company_id, kind="noop_test", idempotency_key="fixed-key-1")
+    job_id_1, _ = enqueue_job(db_conn, company_id, kind="noop_test", idempotency_key="fixed-key-1")
+    job_id_2, _ = enqueue_job(db_conn, company_id, kind="noop_test", idempotency_key="fixed-key-1")
     assert job_id_1 == job_id_2
 
     count = db_conn.execute(
@@ -49,7 +68,7 @@ def test_enqueue_is_idempotent_by_key(db_conn):
 
 def test_claim_runs_job_through_to_completion(db_conn):
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="noop_test")
+    job_id, _ = enqueue_job(db_conn, company_id, kind="noop_test")
 
     job = claim_next_job(db_conn, lease_seconds=300)
     assert job is not None
@@ -84,7 +103,7 @@ def test_stale_lease_is_reclaimed_after_crash(db_conn):
     pick the job back up -- and the original (now-fenced) worker must be
     unable to complete it after the fact."""
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="noop_test")
+    job_id, _ = enqueue_job(db_conn, company_id, kind="noop_test")
 
     worker_a_job = claim_next_job(db_conn, lease_seconds=300)
     assert worker_a_job is not None
@@ -110,7 +129,7 @@ def test_stale_lease_is_reclaimed_after_crash(db_conn):
 
 def test_heartbeat_extends_lease_and_fails_once_fenced(db_conn):
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="noop_test")
+    job_id, _ = enqueue_job(db_conn, company_id, kind="noop_test")
     job = claim_next_job(db_conn, lease_seconds=5)
 
     assert heartbeat(db_conn, job_id, job["lease_token"], lease_seconds=300) is True
@@ -124,7 +143,7 @@ def test_heartbeat_extends_lease_and_fails_once_fenced(db_conn):
 
 def test_transient_failure_retries_then_goes_dead_after_max_attempts(db_conn):
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="always_transient_fail_test", max_attempts=2)
+    job_id, _ = enqueue_job(db_conn, company_id, kind="always_transient_fail_test", max_attempts=2)
 
     # Attempt 1: transient failure -> requeued as a retry.
     job = claim_next_job(db_conn, lease_seconds=300)
@@ -151,7 +170,7 @@ def test_transient_failure_retries_then_goes_dead_after_max_attempts(db_conn):
 
 def test_permanent_failure_goes_dead_immediately(db_conn):
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="always_permanent_fail_test", max_attempts=4)
+    job_id, _ = enqueue_job(db_conn, company_id, kind="always_permanent_fail_test", max_attempts=4)
 
     job = claim_next_job(db_conn, lease_seconds=300)
     assert job["attempts"] == 1  # far from exhausting max_attempts=4
@@ -164,7 +183,7 @@ def test_permanent_failure_goes_dead_immediately(db_conn):
 
 def test_quota_wait_does_not_burn_an_attempt(db_conn):
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="always_quota_wait_test", max_attempts=4)
+    job_id, _ = enqueue_job(db_conn, company_id, kind="always_quota_wait_test", max_attempts=4)
 
     job = claim_next_job(db_conn, lease_seconds=300)
     assert job["attempts"] == 1
@@ -183,7 +202,7 @@ def test_quota_wait_does_not_burn_an_attempt(db_conn):
 
 def test_replay_dead_job_is_idempotent(db_conn):
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="always_permanent_fail_test")
+    job_id, _ = enqueue_job(db_conn, company_id, kind="always_permanent_fail_test")
 
     job = claim_next_job(db_conn, lease_seconds=300)
     fail_job_permanent(db_conn, job_id, job["lease_token"], "synthetic_permanent_failure")
@@ -212,7 +231,7 @@ def test_concurrent_workers_never_claim_the_same_job(test_database_url, db_conn)
     back, so this test explicitly commits and then cleans up after
     itself rather than relying on the fixture's rollback."""
     company_id = _make_company(db_conn)
-    job_id = enqueue_job(db_conn, company_id, kind="noop_test")
+    job_id, _ = enqueue_job(db_conn, company_id, kind="noop_test")
     db_conn.commit()  # must be visible to conn_a/conn_b, which are separate connections
 
     try:

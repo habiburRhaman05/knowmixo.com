@@ -118,11 +118,11 @@ flowchart LR
 │   ├── templates/              # HTML templates
 │   └── static/                 # CSS and JavaScript
 ├── worker/
-│   └── ingest.py               # File processing and indexing
-├── infra/
-│   └── schema.sql              # Database schema
+│   └── runner_main.py          # Durable job runner entrypoint
+├── alembic/                    # Alembic migrations (0001..0008+)
 ├── scripts/
-│   └── init_db.py              # Database initialization
+│   ├── export_openapi.py       # Regenerates openapi.yaml from the app
+│   └── smoke_phase0.py         # Real-provider reachability check
 ├── docs/                       # Setup and operational notes
 ├── requirements.txt
 ├── Dockerfile
@@ -211,10 +211,10 @@ Never commit `.env` or any real secrets. The exact supported variable names are 
 ### 5. Initialize PostgreSQL
 
 ```bash
-python scripts/init_db.py
+alembic upgrade head
 ```
 
-Ensure your database is reachable and the schema is initialized before starting the application. The Pinecone index can be created automatically by the indexing path if the configured account permits it.
+Ensure your database is reachable before running migrations; the resulting schema matches `backend/alembic/versions/` (currently through `0008`). The Pinecone index is created automatically by the indexing path if the configured account permits it.
 
 ### 6. Run FastAPI
 

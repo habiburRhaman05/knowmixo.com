@@ -54,6 +54,22 @@ def _bind_app_to_test_database(test_database_url, monkeypatch_session):
 
     monkeypatch_session.setattr(email_module, "send_email", lambda to, subject, body: None)
 
+    # Starlette's TestClient reports the same fake client address
+    # ("testclient", 50000) for every request in the whole session --
+    # real external callers never collide like this, but every functional
+    # test here would otherwise share one rate-limit bucket per route and
+    # start tripping 429s on unrelated tests well before any real abuse
+    # pattern is being exercised. Rate-limiting behavior itself has its own
+    # dedicated test (test_rate_limiting.py) against a real Redis
+    # connection; everywhere else, fail open.
+    from app.redis_resilience import RateLimiter
+
+    # Stashed so test_rate_limiting.py (which tests the real algorithm
+    # against real Redis) can restore it for just its own tests via a
+    # function-scoped monkeypatch, which auto-reverts to this stub after.
+    RateLimiter._unpatched_check_limit = RateLimiter.check_limit
+    monkeypatch_session.setattr(RateLimiter, "check_limit", lambda self, identifier, limit, window_seconds: (True, limit))
+
     yield
 
     if db_module._pool is not None:

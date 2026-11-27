@@ -28,6 +28,31 @@ PG_CONNECT_TIMEOUT = float(os.environ.get("PG_CONNECT_TIMEOUT", "10.0"))
 
 T = TypeVar("T")
 
+
+_vector_type_info = None  # psycopg.types.TypeInfo for 'vector', fetched once per process
+
+
+def _register_vector_type(conn: psycopg.Connection) -> None:
+    """Binds Python lists directly to pgvector columns/parameters on every
+    pool connection (D3.3). pgvector's own register_vector() does 4 catalog
+    round-trips per call (vector/bit/halfvec/sparsevec) -- ~3.2s against
+    Neon, measured directly, which starved the pool under concurrent test
+    load (every new pool connection blocked on configure() for 3+ seconds,
+    and psycopg_pool won't hand out a connection until configure()
+    returns). This app only ever stores `vector` columns, and a type's OID
+    is stable for the process lifetime, so the TypeInfo is fetched from
+    the network once (first connection only) and reused -- reuse measured
+    at ~0.3ms, no network round-trip at all.
+    """
+    from psycopg.types import TypeInfo
+    from pgvector.psycopg.vector import register_vector_info
+
+    global _vector_type_info
+    if _vector_type_info is None:
+        _vector_type_info = TypeInfo.fetch(conn, "vector")
+    register_vector_info(conn, _vector_type_info)
+
+
 # Transient error codes that warrant retry
 TRANSIENT_ERROR_CODES = {
     "08000",  # connection_exception
@@ -79,6 +104,16 @@ class PostgresResilience:
             },
             open=True,
             timeout=PG_CONNECT_TIMEOUT,
+            # Neon's pooler silently closes idle connections server-side;
+            # without this, a connection the pool thinks is fine comes back
+            # as "server closed the connection unexpectedly" on first use
+            # (observed in test/api/test_chat_and_lifecycle.py). This runs a
+            # cheap round-trip on getconn() and transparently reconnects.
+            check=ConnectionPool.check_connection,
+            # D3.3: lets every connection bind a Python list directly to a
+            # `vector` column/parameter (chunks.embedding) instead of
+            # hand-formatting pgvector's text literal syntax ourselves.
+            configure=_register_vector_type,
         )
         pool.wait()
         log.info("PostgreSQL connection pool created")
@@ -104,14 +139,33 @@ class PostgresResilience:
         return self._healthy
 
     def _is_transient_error(self, error: Exception) -> bool:
-        """Check if error is transient and worth retrying."""
+        """Check if error is transient and worth retrying.
+
+        IMPORTANT: the message-substring fallback below must only ever be
+        applied to actual database-driver exceptions (psycopg.Error and
+        subclasses). It must NEVER be applied to arbitrary exceptions —
+        e.g. an SMTP failure ("Connection unexpectedly closed") or an
+        application ValueError can easily contain a word like
+        "connection" or "timeout" in its message, and misclassifying those
+        as a transient *database* error causes callers of `connection()`
+        to have their own business-logic exceptions silently reclassified
+        and retried, corrupting the generator-context-manager protocol
+        (see launch/DAY-1-REPORT.md "generator didn't stop after throw()").
+        """
         if isinstance(error, (OperationalError, InterfaceError)):
             return True
         if hasattr(error, "pgcode") and error.pgcode in TRANSIENT_ERROR_CODES:
             return True
         if hasattr(error, "sqlstate") and error.sqlstate in TRANSIENT_ERROR_CODES:
             return True
-        # Check error message for common transient patterns
+        if not isinstance(error, psycopg.Error):
+            # Anything that isn't a psycopg-raised error is, by definition,
+            # not a transient *database* error -- it's either a caller bug,
+            # an unrelated third-party failure (SMTP, HTTP, etc.), or an
+            # intentional application exception. Never retry those here.
+            return False
+        # Check error message for common transient patterns -- only reached
+        # for psycopg.Error subclasses that aren't already covered above.
         error_str = str(error).lower()
         transient_patterns = [
             "connection",
@@ -161,36 +215,58 @@ class PostgresResilience:
 
     @contextmanager
     def connection(self):
-        """Get a database connection with automatic retry on transient errors."""
-        last_exception = None
+        """Get a database connection, retrying only the ACQUISITION of that
+        connection from the pool on transient errors.
+
+        This is deliberately NOT "retry the whole `with` block". Once a
+        connection has been handed to the caller via `yield`, this
+        generator must follow the generator-context-manager protocol
+        exactly: propagate whatever the caller's code raises, exactly
+        once, immediately. Looping back to `yield` a second time after an
+        exception was already thrown into this generator is illegal (it
+        raises `RuntimeError: generator didn't stop after throw()`) and
+        previously masked the real exception from every caller of
+        `connection()` -- see launch/DAY-1-REPORT.md for the incident this
+        fixes. Retrying business logic that may have partially run (e.g.
+        half of a transaction, or a non-idempotent side effect like
+        sending an email) is also simply wrong regardless of the protocol
+        violation.
+        """
+        last_exception: Optional[Exception] = None
 
         for attempt in range(PG_MAX_RETRIES):
+            pool_cm = self.pool.connection()
             try:
-                with self.pool.connection() as conn:
-                    yield conn
-                return
-            except Exception as e:
+                conn = pool_cm.__enter__()
+            except Exception as e:  # noqa: BLE001 - acquisition failure only
                 last_exception = e
-                if not self._is_transient_error(e):
+                if not self._is_transient_error(e) or attempt == PG_MAX_RETRIES - 1:
+                    if attempt == PG_MAX_RETRIES - 1:
+                        log.error(f"Connection failed after {PG_MAX_RETRIES} attempts: {e}")
                     raise
+                delay = min(PG_RETRY_BASE_DELAY * (2**attempt), PG_RETRY_MAX_DELAY)
+                log.warning(
+                    f"Transient connection error (attempt {attempt + 1}/{PG_MAX_RETRIES}), "
+                    f"retrying in {delay}s: {e}"
+                )
+                time.sleep(delay)
+                self._pool = None  # force reconnection on next attempt
+                continue
 
-                if attempt < PG_MAX_RETRIES - 1:
-                    delay = min(
-                        PG_RETRY_BASE_DELAY * (2 ** attempt),
-                        PG_RETRY_MAX_DELAY,
-                    )
-                    log.warning(
-                        f"Transient connection error (attempt {attempt + 1}/{PG_MAX_RETRIES}), "
-                        f"retrying in {delay}s: {e}"
-                    )
-                    time.sleep(delay)
-                    # Invalidate pool to force reconnection
-                    try:
-                        self._pool = None
-                    except Exception:
-                        pass
-                else:
-                    log.error(f"Connection failed after {PG_MAX_RETRIES} attempts: {e}")
+            # Connection acquired. From here on, ANY exception -- including
+            # one raised by the caller's own code inside the `with` block --
+            # propagates through pool_cm.__exit__ and out of this generator
+            # exactly once. It is never retried and never reclassified.
+            try:
+                yield conn
+            except BaseException:
+                import sys
+
+                if not pool_cm.__exit__(*sys.exc_info()):
+                    raise
+            else:
+                pool_cm.__exit__(None, None, None)
+            return
 
         raise last_exception
 
@@ -231,11 +307,15 @@ def get_pg() -> PostgresResilience:
 
 
 def reset_pg():
-    """Reset the global PostgreSQL wrapper (for testing)."""
-    global _pg_resilience
+    """Reset the global PostgreSQL wrapper (for testing). Also clears the
+    cached vector TypeInfo: a reset can repoint at a different database
+    (e.g. TEST_DATABASE_URL), where pgvector's 'vector' type OID is not
+    guaranteed to match the previous database's."""
+    global _pg_resilience, _vector_type_info
     if _pg_resilience:
         _pg_resilience.close()
     _pg_resilience = None
+    _vector_type_info = None
 
 
 def with_pg_retry(func: Callable[..., T]) -> Callable[..., T]:

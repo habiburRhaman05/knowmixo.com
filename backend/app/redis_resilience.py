@@ -66,7 +66,20 @@ class ResilientRedis:
     """Redis client wrapper with retry, circuit breaker, and graceful degradation."""
 
     def __init__(self, url: Optional[str] = None):
-        self.url = url or os.environ.get("REDIS_URL", "")
+        # Prefer explicit arg, then settings() (which reads .env via
+        # pydantic_settings and strips quotes), then os.environ as a last
+        # resort. Previously only os.environ was consulted which meant the
+        # value loaded from .env by the backend was invisible to the Redis
+        # layer — breaking rate limits / sessions in prod. See
+        # launch/00-BUILD-HEALTH.md §2.1.
+        if url is None:
+            try:
+                from app.config import settings
+
+                url = settings().redis_url
+            except Exception:  # noqa: BLE001 — avoid import-cycle surprises
+                url = os.environ.get("REDIS_URL", "")
+        self.url = url or ""
         if not self.url:
             raise ValueError("REDIS_URL is required")
 

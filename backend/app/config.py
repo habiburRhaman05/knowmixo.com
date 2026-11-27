@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     # === Database (Neon PostgreSQL) ===
     database_url: str = ""  # postgresql://user:pass@host/db?sslmode=require
 
+    # RLS-bound `app_user` role (ADR 002 / migration 0011), provisioned
+    # per-environment by scripts/provision_app_user.py. Empty until that
+    # script has been run; the live app's own request-serving pool does
+    # not use this yet -- see migration 0011's docstring. Exists as a
+    # declared field (rather than a raw os.environ read) so it goes
+    # through the same .env loading and quote-stripping as every other
+    # credential here, and so tests can read it via settings() instead of
+    # needing it manually exported into the shell.
+    database_url_app: str = ""
+
     # === Redis (native) ===
     redis_url: str = ""  # redis://user:pass@localhost:6379
 
@@ -27,10 +37,30 @@ class Settings(BaseSettings):
     embedding_model: str = "@cf/baai/bge-m3"
     embedding_dim: int = 1024
 
+    # === Vector store (D3.3 dual-write, ADR 001) ===
+    # Writes always go to BOTH Pinecone and pgvector (app/ingestion/pipeline.py).
+    # This only controls which one CHAT RETRIEVAL reads from. Default stays
+    # 'pinecone' (the already-proven read path) through the 72h dual-write
+    # window; flips to 'pgvector' once hybrid retrieval (D3.4) is verified
+    # against it.
+    vector_store: str = "pinecone"
+
     # === Groq LLM ===
     groq_api_key: str = ""
     chat_model: str = "openai/gpt-oss-120b"
     free_only: bool = True  # Fail startup if paid routes would be reachable
+
+    # === OpenRouter (ADR 004 fallback -- not in the live chain by default;
+    # see app/providers/openrouter_chat.py's module docstring) ===
+    openrouter_api_key: str = ""
+
+    # === Reranker (RAG v2, launch/05-RAG-V2-SPEC.md) ===
+    reranker_provider: str = "cloudflare"
+    reranker_model: str = "@cf/baai/bge-reranker-base"
+    jina_api_key: str = ""
+
+    # === RAG engine (v1 = proven single-shot, v2 = multi-stage state machine) ===
+    rag_engine: str = "v1"
 
     # === Budget enforcement ===
     global_chat_daily_limit: int = 1000
@@ -59,6 +89,28 @@ class Settings(BaseSettings):
     max_file_bytes: int = 10485760  # 10 MiB
     max_crawl_pages: int = 20
     max_company_storage_bytes: int = 104857600  # 100 MiB
+
+    # === Billing (Stripe, ADR 008) ===
+    stripe_secret_key: str = ""
+    stripe_publishable_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_tax_enabled: bool = True
+
+    # === Channels: WhatsApp Cloud API + Meta (Messenger/Instagram) ===
+    # D6.1/D6.4: live delivery PENDING_EXTERNAL on Meta business verification
+    # and template approval -- code works standalone, no-ops when unset.
+    channels_api_version: str = "v19.0"
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_business_account_id: str = ""
+    whatsapp_webhook_verify_token: str = ""
+    meta_app_secret: str = ""  # shared Meta app secret, HMACs webhook signatures for WhatsApp/Messenger/Instagram
+    messenger_page_access_token: str = ""
+    instagram_access_token: str = ""
+
+    # === Slack app (D9.5): OAuth install + alerts channel delivery ===
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
 
     # === Job runner tuning ===
     job_max_attempts: int = 4
@@ -106,6 +158,23 @@ class Settings(BaseSettings):
             raise ValueError("REDIS_URL is required.")
         if not self.pinecone_api_key or not self.pinecone_host:
             raise ValueError("PINECONE_API_KEY and PINECONE_HOST are required.")
+
+        # AUTH_SECRET gate: a short or empty secret in production makes
+        # every signed artifact forgeable (escalation deep-link, API-key
+        # HMAC, CSRF). Fail-closed in production; warn once in dev.
+        # See launch/00-BUILD-HEALTH.md §2.3 and launch/03-RISKS-AND-BLOCKERS.md R02.
+        if len(self.auth_secret) < 32:
+            if self.app_env == "production":
+                raise ValueError(
+                    "AUTH_SECRET must be at least 32 bytes in production. "
+                    "Generate one with: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+                )
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "AUTH_SECRET is missing or shorter than 32 bytes. Fine in dev; "
+                "required in production."
+            )
 
 
 @lru_cache

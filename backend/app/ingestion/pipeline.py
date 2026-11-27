@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Callable
 
 from app.ingestion.chunker import chunk_blocks
+from app.ingestion.parsers.csv_source import ParseError as CsvParseError
+from app.ingestion.parsers.csv_source import parse_csv
 from app.ingestion.parsers.docx import ParseError as DocxParseError
 from app.ingestion.parsers.docx import parse_docx
 from app.ingestion.parsers.html import ParseError as HtmlParseError
@@ -22,6 +24,7 @@ from app.ingestion.parsers.pdf import ParseError as PdfParseError
 from app.ingestion.parsers.pdf import parse_pdf
 from app.ingestion.parsers.text import ParseError as TextParseError
 from app.ingestion.parsers.text import parse_faqs, parse_text
+from app.ingestion.language import detect_language
 from app.ingestion.tokenizer import count_tokens
 from app.config import settings
 from app.jobs.runner import PermanentJobError, TransientJobError
@@ -42,6 +45,7 @@ _PERMANENT_INPUT_ERRORS = (
     DocxParseError,
     HtmlParseError,
     TextParseError,
+    CsvParseError,
     SSRFBlocked,
     json.JSONDecodeError,  # malformed FAQ JSON is also a property of the input, not transient
 )
@@ -63,6 +67,8 @@ def _extract_blocks(document: dict) -> list[dict]:
             return parse_pdf(raw_bytes)
         if suffix == ".docx":
             return parse_docx(raw_bytes)
+        if suffix == ".csv":
+            return parse_csv(raw_bytes)
         if suffix == ".json":  # FAQ sources are stored as a JSON Q/A array
             items = json.loads(raw_bytes.decode("utf-8"))
             return parse_faqs(items)
@@ -90,14 +96,19 @@ def run_ingestion(
     blocks = _extract_blocks(document)
     heartbeat()
 
+    language = detect_language(" ".join(b.get("text", "") for b in blocks[:20]))
+
     try:
-        chunks = chunk_blocks(blocks, count_tokens_fn=count_tokens)
+        chunks = chunk_blocks(blocks, count_tokens_fn=count_tokens, doc_title=document.get("title"))
     except ValueError as exc:  # "No chunks produced" -- also a property of the input, not transient
         raise PermanentJobError("no_chunks_produced") from exc
     heartbeat()
 
-    texts = [c["text"] for c in chunks]
-    vectors = embed_fn(texts)
+    # The context prefix (doc title > heading) is embedded for retrieval
+    # quality but never stored/displayed -- chunks[*]["text"] stays the
+    # clean, citable original (D3.2).
+    embed_texts = [f"{c['context_prefix']}\n{c['text']}" if c["context_prefix"] else c["text"] for c in chunks]
+    vectors = embed_fn(embed_texts)
     heartbeat()
 
     chunk_rows = []
@@ -119,10 +130,13 @@ def run_ingestion(
     for row in chunk_rows:
         conn.execute(
             """
-            INSERT INTO chunks (version_id, ordinal, page, heading, text, vector_id, checksum)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO chunks (version_id, ordinal, page, heading, text, vector_id, checksum, embedding, language)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (document_version["id"], row["ordinal"], row["page"], row["heading"], row["text"], row["vector_id"], row["checksum"]),
+            (
+                document_version["id"], row["ordinal"], row["page"], row["heading"], row["text"],
+                row["vector_id"], row["checksum"], row["vector"], language,
+            ),
         )
     heartbeat()
 

@@ -72,6 +72,7 @@ class SessionPrincipal:
     company_id: str | None
     email: str
     email_verified: bool
+    role: str | None = None  # 'owner'|'admin'|'agent'|'viewer', via memberships (D8.6)
 
 
 # --- Users and companies -----------------------------------------------
@@ -172,16 +173,48 @@ def resolve_session(conn, token: str) -> SessionPrincipal | None:
     if not row or row["disabled_at"] is not None:
         return None
 
-    company = conn.execute(
-        "SELECT id FROM companies WHERE owner_user_id = %s AND deleted_at IS NULL",
+    # Every signup path inserts an 'owner' membership in the same
+    # transaction as the company (_create_user_with_company), so this is
+    # purely additive: existing single-company owners resolve exactly as
+    # before, and D8.6 invited members (role != 'owner', no owned company
+    # of their own) now also resolve a company_id + role here. A user with
+    # more than one membership (not a V1-supported shape) gets their owner
+    # membership if they have one, else their oldest membership.
+    membership = conn.execute(
+        """
+        SELECT m.company_id, m.role
+        FROM memberships m JOIN companies c ON c.id = m.company_id
+        WHERE m.user_id = %s AND c.deleted_at IS NULL
+        ORDER BY (m.role = 'owner') DESC, m.created_at ASC
+        LIMIT 1
+        """,
         (row["user_id"],),
     ).fetchone()
 
+    company_id = str(membership["company_id"]) if membership else None
+    role = membership["role"] if membership else None
+
+    if company_id is None:
+        # Defense in depth: migration 0027 backfilled every pre-existing
+        # gap between companies.owner_user_id and memberships (found 7 of
+        # 29 real users missing a row), but this direct lookup stays as a
+        # permanent safety net so a future insert path that forgets the
+        # membership row can never silently log an owner out of their own
+        # company.
+        owned = conn.execute(
+            "SELECT id FROM companies WHERE owner_user_id = %s AND deleted_at IS NULL",
+            (row["user_id"],),
+        ).fetchone()
+        if owned:
+            company_id = str(owned["id"])
+            role = "owner"
+
     return SessionPrincipal(
         user_id=str(row["user_id"]),
-        company_id=str(company["id"]) if company else None,
+        company_id=company_id,
         email=row["email"],
         email_verified=row["email_verified_at"] is not None,
+        role=role,
     )
 
 
@@ -234,13 +267,25 @@ def signup(conn, email: str, password: str, name: str) -> None:
     send_verification_email(email, token)
 
 
-def login_with_password(conn, email: str, password: str) -> str:
+def login_with_password(conn, email: str, password: str) -> dict:
+    """Returns {"session_token": ...} as before when MFA is off (the
+    unchanged path for every account today), or {"mfa_required": True,
+    "mfa_token": ...} when the account has MFA enabled -- the caller
+    exchanges mfa_token + a TOTP/recovery code at POST /auth/mfa/login-verify
+    for the real session (see app.security.mfa)."""
     user = get_user_by_email(conn, email)
     if not user or not verify_password(password, user["password_hash"]):
         raise AuthError(401, "invalid_credentials", "Email or password is incorrect.")
     if user["disabled_at"] is not None:
         raise AuthError(403, "account_disabled", "This account is disabled.")
-    return create_session(conn, user["id"])
+
+    from app.security.mfa import is_mfa_enabled
+
+    if is_mfa_enabled(conn, str(user["id"])):
+        from app.security.mfa_login import issue_mfa_login_challenge
+        return {"mfa_required": True, "mfa_token": issue_mfa_login_challenge(str(user["id"]))}
+
+    return {"session_token": create_session(conn, user["id"])}
 
 
 def verify_email(conn, token: str) -> None:
@@ -315,11 +360,16 @@ def require_reauthentication(conn, user_id: str, current_password: str | None) -
 # --- Google OAuth -----------------------------------------------------
 
 
-def login_or_signup_with_google(conn, claims: dict) -> str:
+def login_or_signup_with_google(conn, claims: dict) -> dict:
     """Never implicitly links a Google identity to an existing
     email/password account -- an email collision with no existing
     oauth_accounts row is rejected and must go through the authenticated
-    /me/oauth/google/link flow instead (docs/03-TRD.md)."""
+    /me/oauth/google/link flow instead (docs/03-TRD.md).
+
+    Returns the same {"session_token"} / {"mfa_required"} shape as
+    login_with_password -- an already-linked account with MFA enabled
+    still has to clear that second factor, Google sign-in is not a way
+    around it."""
     subject = claims["sub"]
     email = claims["email"]
 
@@ -334,7 +384,14 @@ def login_or_signup_with_google(conn, claims: dict) -> str:
     if linked:
         if linked["disabled_at"] is not None:
             raise AuthError(403, "account_disabled", "This account is disabled.")
-        return create_session(conn, linked["id"])
+
+        from app.security.mfa import is_mfa_enabled
+
+        if is_mfa_enabled(conn, str(linked["id"])):
+            from app.security.mfa_login import issue_mfa_login_challenge
+            return {"mfa_required": True, "mfa_token": issue_mfa_login_challenge(str(linked["id"]))}
+
+        return {"session_token": create_session(conn, linked["id"])}
 
     existing_email = get_user_by_email(conn, email)
     if existing_email:
@@ -350,7 +407,7 @@ def login_or_signup_with_google(conn, claims: dict) -> str:
         (user["id"], subject),
     )
     conn.execute("UPDATE users SET email_verified_at = now() WHERE id = %s", (user["id"],))
-    return create_session(conn, user["id"])
+    return {"session_token": create_session(conn, user["id"])}
 
 
 def link_google_account(conn, user_id: str, claims: dict) -> None:

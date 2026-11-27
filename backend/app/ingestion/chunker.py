@@ -36,9 +36,20 @@ def chunk_blocks(
     target_tokens: int = TARGET_TOKENS,
     overlap_tokens: int = OVERLAP_TOKENS,
     max_tokens: int = MAX_TOKENS,
+    doc_title: str | None = None,
 ) -> list[dict]:
     """blocks: already paragraph/heading-split [{"heading", "page", "text"}].
-    Returns ordered chunks: [{"ordinal", "heading", "page", "text", "token_count"}].
+    Returns ordered chunks: [{"ordinal", "heading", "page", "text",
+    "token_count", "context_prefix"}].
+
+    `context_prefix` (D3.2: "attach doc title > heading path context") is
+    "{doc_title} > {heading}" (either half omitted if absent) -- meant to
+    be prepended to `text` ONLY for the embedding call, not stored as the
+    chunk's displayed/cited text. A chunk like "Starter costs $29/mo" is
+    ambiguous in isolation; "Acme Pricing > Starter Plan\\nStarter costs
+    $29/mo" embeds and retrieves far better, without changing what the
+    user actually sees cited.
+
     Raises ValueError if blocks contain no usable text at all.
     """
     raw_chunks: list[dict] = []
@@ -93,6 +104,7 @@ def chunk_blocks(
             overlap_words = previous_text.split()[-overlap_tokens:]
             candidate = " ".join(overlap_words) + " " + raw["text"]
             text = candidate if count_tokens_fn(candidate) <= max_tokens else raw["text"]
+        prefix_parts = [p for p in (doc_title, raw["heading"]) if p]
         final_chunks.append(
             {
                 "ordinal": i,
@@ -100,6 +112,7 @@ def chunk_blocks(
                 "page": raw["page"],
                 "text": text,
                 "token_count": count_tokens_fn(text),
+                "context_prefix": " > ".join(prefix_parts) if prefix_parts else None,
             }
         )
         previous_text = raw["text"]

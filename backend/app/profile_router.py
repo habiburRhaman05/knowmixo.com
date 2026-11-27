@@ -11,7 +11,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.auth import service
 from app.auth.service import AuthError, SessionPrincipal, get_company_for_owner, get_user_by_id
 from app.db import connection
-from app.deps import get_current_principal
+from app.deps import get_current_principal, require_step_up
 from app.security.google_oauth import GoogleTokenError, verify_google_id_token
 
 router = APIRouter(prefix="/api/v1", tags=["profile"])
@@ -88,7 +88,7 @@ def link_google(body: GoogleLinkRequest, principal: SessionPrincipal = Depends(g
 
 
 @router.delete("/me", status_code=202)
-def delete_account(body: DeleteAccountRequest, principal: SessionPrincipal = Depends(get_current_principal)):
+def delete_account(body: DeleteAccountRequest, principal: SessionPrincipal = Depends(require_step_up)):
     if not body.confirm:
         raise HTTPException(status_code=400, detail={"code": "confirmation_required", "message": "Set confirm=true to delete your account."})
     try:

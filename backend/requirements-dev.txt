@@ -9,6 +9,7 @@ pytest-mock==3.14.0
 httpx==0.27.2
 faker==25.3.0
 freezegun==1.5.1
+reportlab==4.2.5  # builds real PDF fixtures (headings/tables) for test/unit/test_parsers.py
 
 # Code quality
 black==24.8.0

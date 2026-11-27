@@ -19,6 +19,7 @@ stream. Client abort (cancellation / aclose) marks the assistant message
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import AsyncIterator
@@ -29,8 +30,10 @@ from psycopg.errors import UniqueViolation
 from app.chat import llm, quota
 from app.config import settings
 from app.db import connection
+from app.events.outbox import emit_event
 from app.guardrails import classify_input, contains_sensitive_output
 from app.jobs.runner import QuotaWaitError
+from app.realtime.pubsub import inbox_channel, publish_sync
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +99,25 @@ def record_event(conn, scope: Scope, event_type: str, message_id: str | None = N
         """,
         (scope.company_id, scope.bot_id, scope.conversation_id, message_id, event_type, json.dumps(properties or {})),
     )
+
+
+def _notify_inbox(conn, scope: Scope, role: str, text: str, message_id: str) -> None:
+    """Pushes a live-inbox update (ADR 005): emit_event durably seeds
+    event_outbox (so a reconnecting owner inbox never misses this turn),
+    publish_sync fans it out to any owner tab subscribed right now.
+    Never raises -- a dropped notification must not fail the chat turn."""
+    payload = {
+        "conversation_id": scope.conversation_id,
+        "bot_id": scope.bot_id,
+        "message_id": message_id,
+        "role": role,
+        "preview": text[:200],
+    }
+    try:
+        emit_event(conn, scope.company_id, "conversation.message", payload, bot_id=scope.bot_id)
+    except Exception:
+        log.warning("failed to emit conversation.message outbox event", exc_info=True)
+    publish_sync(inbox_channel(scope.company_id), "conversation.message", payload)
 
 
 # --- Scope resolution -----------------------------------------------------
@@ -270,6 +292,8 @@ def prepare_turn(scope: Scope, text: str, client_key: str | None) -> Turn:
             turn.generation_id = str(assistant_row["generation_id"])
             conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (scope.conversation_id,))
             record_event(conn, scope, "message_sent", message_id=turn.user_message_id, properties={"preview": scope.is_preview})
+            if not scope.is_preview:
+                _notify_inbox(conn, scope, role="user", text=text, message_id=turn.user_message_id)
 
     if quota_error:
         raise ChatError(429, "quota_exhausted", "The daily free usage limit has been reached.", quota_error.retry_after_seconds)
@@ -376,6 +400,8 @@ def finalize_turn(turn: Turn, status: str, content: str, sources: list[dict], us
         if status == "completed" and not sources:
             record_event(conn, scope, "answer_no_evidence", message_id=turn.assistant_message_id)
         conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (scope.conversation_id,))
+        if status == "completed" and not scope.is_preview:
+            _notify_inbox(conn, scope, role="assistant", text=content, message_id=turn.assistant_message_id)
 
 
 # --- Streaming ------------------------------------------------------------
@@ -437,10 +463,20 @@ async def stream_turn(turn: Turn) -> AsyncIterator[str]:
     error_code: str | None = None
     finalized = False
     prompt_tokens = 0
+    t_start = time.monotonic()
+    ttft_ms: int | None = None  # D8.2 analytics: time to first `delta` SSE event
+
+    def mark_ttft() -> None:
+        nonlocal ttft_ms
+        if ttft_ms is None:
+            ttft_ms = int((time.monotonic() - t_start) * 1000)
 
     def usage() -> dict:
         completion = llm.estimate_tokens(answer) if answer else 0
-        return {"prompt_tokens_est": prompt_tokens, "completion_tokens_est": completion, "total_tokens_est": prompt_tokens + completion}
+        return {
+            "prompt_tokens_est": prompt_tokens, "completion_tokens_est": completion,
+            "total_tokens_est": prompt_tokens + completion, "ttft_ms": ttft_ms,
+        }
 
     try:
         yield event("meta", {"conversation_id": scope.conversation_id, "message_id": turn.assistant_message_id, "generation_id": turn.generation_id})
@@ -459,6 +495,7 @@ async def stream_turn(turn: Turn) -> AsyncIterator[str]:
 
             if not passages:
                 answer = scope.config.get("fallback_message") or "I couldn't find an answer to that in the available information."
+                mark_ttft()
                 yield event("delta", {"text": answer})
                 status = "completed"
             else:
@@ -471,6 +508,7 @@ async def stream_turn(turn: Turn) -> AsyncIterator[str]:
                             yield ": heartbeat\n\n"
                             continue
                         answer += chunk
+                        mark_ttft()
                         yield event("delta", {"text": chunk})
                     status = "completed"
                 except llm.LLMError as exc:
@@ -479,6 +517,16 @@ async def stream_turn(turn: Turn) -> AsyncIterator[str]:
         if failure is None and status == "completed" and contains_sensitive_output(answer):
             answer = BLOCKED_OUTPUT_TEXT
             failure = ChatError(200, "output_blocked", BLOCKED_OUTPUT_TEXT)
+
+        if failure is None and status == "completed":
+            # D9.6 security suite: sanitise the STORED/replayed copy the
+            # same way app.chat.rag_v2.pipeline already does for v2 --
+            # knowledge-source content (crawled HTML, owner-pasted text)
+            # can carry raw markup that must never reach a visitor
+            # unescaped on replay or export, even if the live SSE stream
+            # itself already went out token-by-token.
+            from app.chat.rag_v2.stages.postprocess import sanitize_html
+            answer = sanitize_html(answer)
 
         if failure is not None:
             status = "failed"

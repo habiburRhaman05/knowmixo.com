@@ -1,0 +1,18 @@
+# RAG v2 target config. The harness refuses to run this on Day 1 (pipeline
+# not implemented yet) and lands fully on Day 4.
+pipeline: v2
+corpus: acme
+retrieval:
+  top_k: 8
+  hybrid: true
+  rerank: true
+  loop_iterations: 3
+  calibrated_threshold: true
+providers:
+  chat:
+    primary: groq
+    fallback: [openrouter]
+  embed:
+    primary: cloudflare
+  rerank:
+    primary: cloudflare

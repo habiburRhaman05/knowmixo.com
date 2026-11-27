@@ -2,6 +2,7 @@ import logging
 import uuid
 from pathlib import Path
 
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -10,13 +11,28 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException
 
 from app import health
+from app.actions.router import router as actions_router
+from app.analytics.router import router as analytics_router
 from app.auth.router import router as auth_router
+from app.billing.router import billing_router, webhook_router as billing_webhook_router
 from app.bots.router import router as bots_router
+from app.channels.router import router as channels_router
+from app.chat.rag_v2.traces_router import router as rag_traces_router
 from app.dashboard.router import router as dashboard_router
+from app.escalation.router import router as escalation_router, public_router as escalation_public_router
+from app.handoff.router import router as handoff_router
+from app.integrations.router import router as slack_router, public_router as slack_public_router
 from app.observability import initialize
 from app.profile_router import router as profile_router
 from app.public.router import router as public_router
+from app.public_api.keys_router import router as api_keys_router
+from app.public_api.problem_details import PublicAPIError, problem_response
+from app.public_api.router import router as public_api_router
+from app.quality.router import router as quality_router
+from app.realtime.router import router as realtime_router
+from app.security.mfa_router import router as mfa_router
 from app.sources.router import router as sources_router
+from app.team.router import router as team_router, public_router as team_public_router
 from app.webhooks.router import router as webhooks_router
 
 initialize()
@@ -60,6 +76,11 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", None) or str(uuid.uuid4())
 
 
+@app.exception_handler(PublicAPIError)
+async def public_api_error_handler(request: Request, exc: PublicAPIError):
+    return problem_response(request, exc)
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Error shape from docs/16: {code, message, retry_after_seconds?, fields?}
@@ -87,6 +108,24 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+@app.exception_handler(psycopg.OperationalError)
+@app.exception_handler(psycopg.InterfaceError)
+async def database_unavailable_handler(request: Request, exc: Exception):
+    """A connection that dies mid-request (Postgres restart, network
+    partition, Neon compute suspend) is infrastructure, not a bug in the
+    request -- 503 tells the client to retry, unlike the generic 500 the
+    Exception handler below would otherwise return. Whatever the request
+    was doing is rolled back by Postgres itself (the dead connection's
+    transaction is never committed), so there is no partial-commit risk
+    here regardless of which statement was in flight."""
+    log.warning("database unavailable request_id=%s: %s", _request_id(request), exc)
+    return JSONResponse(
+        {"code": "database_unavailable", "message": "The database is temporarily unavailable. Please retry.", "request_id": _request_id(request)},
+        status_code=503,
+        headers={"Retry-After": "5"},
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     log.exception("unhandled error request_id=%s", _request_id(request))
@@ -103,11 +142,29 @@ def jsonable(errors):
 
 
 app.include_router(auth_router)
+app.include_router(actions_router)
+app.include_router(analytics_router)
+app.include_router(billing_router)
+app.include_router(billing_webhook_router)
 app.include_router(profile_router)
 app.include_router(dashboard_router)
+app.include_router(escalation_router)
+app.include_router(escalation_public_router)
+app.include_router(handoff_router)
+app.include_router(slack_router)
+app.include_router(slack_public_router)
+app.include_router(mfa_router)
+app.include_router(realtime_router)
 app.include_router(sources_router)
+app.include_router(team_router)
+app.include_router(team_public_router)
 app.include_router(bots_router)
+app.include_router(channels_router)
 app.include_router(public_router)
+app.include_router(api_keys_router)
+app.include_router(public_api_router)
+app.include_router(quality_router)
+app.include_router(rag_traces_router)
 app.include_router(webhooks_router)
 
 

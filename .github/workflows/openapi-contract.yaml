@@ -1,0 +1,62 @@
+name: OpenAPI contract drift
+
+# ADR 007 "API conventions": openapi.yaml is the source of truth for
+# /api/v1, and the generated frontend/src/lib/api-types.ts must never
+# silently drift from it. This job regenerates both from the FastAPI app
+# and fails if either differs from what's committed -- deliberately
+# separate from a full backend test run (not wired into CI yet), since
+# this only needs the app importable, not a live DB/Redis.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/src/lib/api-types.ts"
+      - ".github/workflows/openapi-contract.yaml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "frontend/src/lib/api-types.ts"
+      - ".github/workflows/openapi-contract.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: openapi.yaml + api-types.ts drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend deps
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Check openapi.yaml is up to date
+        working-directory: backend
+        run: python scripts/export_openapi.py --check
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
+      - name: Check api-types.ts is up to date
+        working-directory: frontend
+        run: |
+          npm run generate:api-types
+          git diff --exit-code -- src/lib/api-types.ts

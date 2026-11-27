@@ -12,14 +12,22 @@ import secrets
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+import asyncio
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from starlette.concurrency import run_in_threadpool
 
 from app.auth.service import resolve_session
 from app.chat import pipeline
 from app.chat.pipeline import ChatError
+from app.config import settings
 from app.db import connection
+from app.events.outbox import emit_event
+from app.realtime.pubsub import conversation_channel
+from app.realtime.router import _CONVERSATION_TOPICS, _seed_from_outbox, _stream, SSE_HEADERS
+from app.security.rate_limit import RateLimited
 
 router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
@@ -85,18 +93,6 @@ def _check_origin(conn, bot_id: str, origin: str | None) -> None:
         raise _error(403, "origin_not_allowed", "This origin is not allowed to use this assistant.")
 
 
-def _rate_limit_session_bootstrap(request: Request) -> None:
-    """Best-effort per-IP limiter. Redis outage degrades to 'allow' (the
-    RateLimiter itself also degrades), never to a 500 on the public path."""
-    try:
-        from app.redis_resilience import RateLimiter, get_redis
-
-        ip = request.client.host if request.client else "unknown"
-        allowed, _remaining = RateLimiter(get_redis(), "visitor_bootstrap").check_limit(ip, SESSION_RATE_LIMIT, 60)
-    except Exception:  # noqa: BLE001
-        return
-    if not allowed:
-        raise _error(429, "rate_limited", "Too many requests. Try again shortly.", headers={"Retry-After": "60"})
 
 
 # --- Auth -------------------------------------------------------------------
@@ -173,9 +169,12 @@ def get_public_bot_config(public_id: str, request: Request):
     }
 
 
-@router.post("/bots/{public_id}/sessions", status_code=201)
+@router.post(
+    "/bots/{public_id}/sessions",
+    status_code=201,
+    dependencies=[Depends(RateLimited(SESSION_RATE_LIMIT, 60, "visitor_bootstrap"))],
+)
 def create_visitor_session(public_id: str, request: Request):
-    _rate_limit_session_bootstrap(request)
     token = secrets.token_urlsafe(32)
     with connection() as conn:
         bot = conn.execute(
@@ -212,14 +211,47 @@ def create_conversation(visitor: VisitorPrincipal = Depends(get_visitor)):
             "INSERT INTO analytics_events (company_id, bot_id, conversation_id, event_type) VALUES (%s, %s, %s, 'conversation_started')",
             (visitor.company_id, visitor.bot_id, conversation_id),
         )
+        emit_event(
+            conn,
+            visitor.company_id,
+            "conversation.started",
+            {"conversation_id": conversation_id, "bot_id": visitor.bot_id},
+            bot_id=visitor.bot_id,
+        )
     return {"conversation_id": conversation_id}
+
+
+@router.get("/conversations/{conversation_id}/stream")
+async def conversation_state_stream(
+    conversation_id: str,
+    since: str | None = Query(default=None),
+    visitor: VisitorPrincipal = Depends(get_visitor),
+):
+    """Sidecar SSE (ADR 005): pushes handoff/agent-joined state events for
+    the life of the tab. Separate from the chat SSE in send_message, which
+    only streams a single reply and closes."""
+    def _check():
+        with connection() as conn:
+            pipeline.visitor_scope(conn, visitor.session_id, conversation_id)
+
+    try:
+        await run_in_threadpool(_check)
+    except ChatError as exc:
+        _raise_chat(exc)
+
+    seed = await run_in_threadpool(_seed_from_outbox, visitor.company_id, since, _CONVERSATION_TOPICS, conversation_id)
+    return StreamingResponse(_stream(conversation_channel(conversation_id), seed), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 class MessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=pipeline.MAX_MESSAGE_CHARS)
 
 
-@router.post("/conversations/{conversation_id}/messages", response_model=None)
+@router.post(
+    "/conversations/{conversation_id}/messages",
+    response_model=None,
+    dependencies=[Depends(RateLimited(20, 60, "public_chat_message"))],
+)
 async def send_message(
     conversation_id: str,
     body: MessageRequest,
@@ -240,6 +272,9 @@ async def send_message(
         _raise_chat(exc)
     if turn.replay:
         return pipeline.sse_response(pipeline.replay_stream(turn))
+    if settings().rag_engine == "v2":
+        from app.chat.rag_v2.pipeline import stream_turn_v2
+        return pipeline.sse_response(stream_turn_v2(turn))
     return pipeline.sse_response(pipeline.stream_turn(turn))
 
 
@@ -252,7 +287,11 @@ class LeadRequest(BaseModel):
     consent: bool
 
 
-@router.post("/conversations/{conversation_id}/lead", status_code=201)
+@router.post(
+    "/conversations/{conversation_id}/lead",
+    status_code=201,
+    dependencies=[Depends(RateLimited(5, 60, "public_lead"))],
+)
 def submit_lead(conversation_id: str, body: LeadRequest, visitor: VisitorPrincipal = Depends(get_visitor)):
     _require_uuid(conversation_id, "conversation_not_found", "Conversation not found.")
     if body.consent is not True:
@@ -296,6 +335,13 @@ def submit_lead(conversation_id: str, body: LeadRequest, visitor: VisitorPrincip
             "INSERT INTO analytics_events (company_id, bot_id, conversation_id, event_type) VALUES (%s, %s, %s, 'lead_submitted')",
             (visitor.company_id, visitor.bot_id, conversation_id),
         )
+        emit_event(
+            conn,
+            visitor.company_id,
+            "lead.submitted",
+            {"conversation_id": conversation_id, "lead_id": str(row["id"]), "values": values},
+            bot_id=visitor.bot_id,
+        )
     return {"status": "submitted"}
 
 
@@ -307,7 +353,11 @@ class FeedbackRequest(BaseModel):
     comment: str | None = Field(default=None, max_length=2000)
 
 
-@router.post("/messages/{message_id}/feedback", status_code=201)
+@router.post(
+    "/messages/{message_id}/feedback",
+    status_code=201,
+    dependencies=[Depends(RateLimited(10, 60, "public_feedback"))],
+)
 def submit_feedback(message_id: str, body: FeedbackRequest, authorization: str | None = Header(default=None)):
     """Accepts a visitor token OR an owner session. The message must sit in
     the caller's own authorised scope; anything else is a 404 (never a 403
@@ -361,5 +411,18 @@ def submit_feedback(message_id: str, body: FeedbackRequest, authorization: str |
             VALUES (%s, %s, %s, %s, 'feedback_given', %s::jsonb)
             """,
             (company_id, bot_id, msg["conversation_id"], message_id, json.dumps({"rating": body.rating, "actor": actor})),
+        )
+        emit_event(
+            conn,
+            company_id,
+            "feedback.given",
+            {
+                "conversation_id": str(msg["conversation_id"]),
+                "message_id": message_id,
+                "rating": body.rating,
+                "comment": body.comment,
+                "actor": actor,
+            },
+            bot_id=bot_id,
         )
     return {"status": "recorded"}

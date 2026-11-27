@@ -43,17 +43,14 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
 # --- Conversations ----------------------------------------------------------
 
 
-def list_conversations(
-    conn,
+def _build_conversation_filters(
     company_id: str,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
-    status: str | None = None,
-    has_feedback: bool | None = None,
-    cursor: str | None = None,
-    limit: int = DEFAULT_PAGE_SIZE,
-) -> dict:
-    limit = max(1, min(limit, MAX_PAGE_SIZE))
+    date_from: datetime | None,
+    date_to: datetime | None,
+    status: str | None,
+    has_feedback: bool | None,
+    tags: list[str] | None,
+) -> tuple[list[str], list]:
     where = ["b.company_id = %s", "NOT c.is_preview"]
     params: list = [company_id]
     if date_from:
@@ -63,8 +60,12 @@ def list_conversations(
         where.append("c.created_at <= %s")
         params.append(date_to)
     if status:
-        if status not in ("active", "closed"):
-            raise BotError(422, "invalid_status", "status must be 'active' or 'closed'.")
+        # NOTE: this column's semantics changed in migration 0022 from a
+        # conversation-lifecycle flag ('active'/'closed', never actually
+        # written anywhere) to the handoff state machine ('bot'/'queued'/
+        # 'assigned'/'resolved'). The filter below reflects current reality.
+        if status not in ("bot", "queued", "assigned", "resolved"):
+            raise BotError(422, "invalid_status", "status must be one of: bot, queued, assigned, resolved.")
         where.append("c.status = %s")
         params.append(status)
     feedback_exists = "EXISTS (SELECT 1 FROM feedback f JOIN messages fm ON fm.id = f.message_id WHERE fm.conversation_id = c.id)"
@@ -72,6 +73,26 @@ def list_conversations(
         where.append(feedback_exists)
     elif has_feedback is False:
         where.append(f"NOT {feedback_exists}")
+    if tags:
+        where.append("c.tags && %s::text[]")
+        params.append(tags)
+    return where, params
+
+
+def list_conversations(
+    conn,
+    company_id: str,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    status: str | None = None,
+    has_feedback: bool | None = None,
+    tags: list[str] | None = None,
+    cursor: str | None = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+) -> dict:
+    limit = max(1, min(limit, MAX_PAGE_SIZE))
+    where, params = _build_conversation_filters(company_id, date_from, date_to, status, has_feedback, tags)
+    feedback_exists = "EXISTS (SELECT 1 FROM feedback f JOIN messages fm ON fm.id = f.message_id WHERE fm.conversation_id = c.id)"
     if cursor:
         ts, row_id = decode_cursor(cursor)
         where.append("(c.created_at, c.id) < (%s, %s::uuid)")
@@ -79,7 +100,7 @@ def list_conversations(
 
     rows = conn.execute(
         f"""
-        SELECT c.id, c.status, c.created_at, c.updated_at,
+        SELECT c.id, c.status, c.tags, c.created_at, c.updated_at,
                (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count,
                {feedback_exists} AS has_feedback,
                EXISTS (SELECT 1 FROM leads l WHERE l.conversation_id = c.id) AS has_lead
@@ -98,6 +119,7 @@ def list_conversations(
             {
                 "id": str(r["id"]),
                 "status": r["status"],
+                "tags": r["tags"] or [],
                 "created_at": r["created_at"].isoformat(),
                 "updated_at": r["updated_at"].isoformat(),
                 "message_count": int(r["message_count"]),
@@ -108,6 +130,68 @@ def list_conversations(
         ],
         "next_cursor": next_cursor,
     }
+
+
+MAX_EXPORT_ROWS = 10_000
+
+
+def export_conversations_csv(
+    conn,
+    company_id: str,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    status: str | None = None,
+    has_feedback: bool | None = None,
+    tags: list[str] | None = None,
+) -> str:
+    """Returns CSV text (never a row count over MAX_EXPORT_ROWS -- a
+    filtered date range is expected for anything larger; this is an
+    on-demand export, not a background job)."""
+    import csv
+    import io
+
+    where, params = _build_conversation_filters(company_id, date_from, date_to, status, has_feedback, tags)
+    feedback_exists = "EXISTS (SELECT 1 FROM feedback f JOIN messages fm ON fm.id = f.message_id WHERE fm.conversation_id = c.id)"
+    rows = conn.execute(
+        f"""
+        SELECT c.id, c.status, c.tags, c.created_at, c.updated_at,
+               (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count,
+               {feedback_exists} AS has_feedback,
+               EXISTS (SELECT 1 FROM leads l WHERE l.conversation_id = c.id) AS has_lead
+        FROM conversations c JOIN bots b ON b.id = c.bot_id
+        WHERE {' AND '.join(where)}
+        ORDER BY c.created_at DESC
+        LIMIT %s
+        """,
+        (*params, MAX_EXPORT_ROWS),
+    ).fetchall()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["conversation_id", "status", "tags", "created_at", "updated_at", "message_count", "has_feedback", "has_lead"])
+    for r in rows:
+        writer.writerow([
+            str(r["id"]), r["status"], ";".join(r["tags"] or []),
+            r["created_at"].isoformat(), r["updated_at"].isoformat(),
+            r["message_count"], r["has_feedback"], r["has_lead"],
+        ])
+    return buf.getvalue()
+
+
+def set_conversation_tags(conn, company_id: str, conversation_id: str, tags: list[str]) -> list[str]:
+    cleaned = sorted({t.strip() for t in tags if t.strip()})[:50]
+    row = conn.execute(
+        """
+        UPDATE conversations c SET tags = %s::text[], updated_at = now()
+        FROM bots b
+        WHERE c.bot_id = b.id AND c.id = %s AND b.company_id = %s
+        RETURNING c.tags
+        """,
+        (cleaned, conversation_id, company_id),
+    ).fetchone()
+    if not row:
+        raise BotError(404, "conversation_not_found", "Conversation not found.")
+    return row["tags"] or []
 
 
 def get_conversation_detail(conn, company_id: str, conversation_id: str) -> dict:

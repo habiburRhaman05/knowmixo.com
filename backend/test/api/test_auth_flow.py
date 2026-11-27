@@ -155,14 +155,19 @@ def test_account_deletion_requires_confirm_and_revokes_sessions(db_conn):
     client = _client()
     token = _signup_verify_login(client, "deleteme@example.com", "correct-horse-battery", db_conn)
 
-    missing_confirm = client.delete(
+    # httpx's TestClient.delete() doesn't accept a `json` body (DELETE with
+    # a body needs the generic .request() method) -- this endpoint requires
+    # one (confirm + current_password), so it must go through .request().
+    missing_confirm = client.request(
+        "DELETE",
         "/api/v1/me",
         json={"confirm": False, "current_password": "correct-horse-battery"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert missing_confirm.status_code == 400
 
-    deleted = client.delete(
+    deleted = client.request(
+        "DELETE",
         "/api/v1/me",
         json={"confirm": True, "current_password": "correct-horse-battery"},
         headers={"Authorization": f"Bearer {token}"},

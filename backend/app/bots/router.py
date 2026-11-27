@@ -13,6 +13,7 @@ from app.bots import history, service
 from app.bots.service import BotError
 from app.chat import pipeline
 from app.chat.pipeline import ChatError
+from app.config import settings
 from app.db import connection
 from app.deps import get_verified_principal
 from app.idempotency import run_idempotent
@@ -286,6 +287,9 @@ async def preview_chat(
         _raise_chat(exc)
     if turn.replay:
         return pipeline.sse_response(pipeline.replay_stream(turn))
+    if settings().rag_engine == "v2":
+        from app.chat.rag_v2.pipeline import stream_turn_v2
+        return pipeline.sse_response(stream_turn_v2(turn))
     return pipeline.sse_response(pipeline.stream_turn(turn))
 
 
@@ -298,16 +302,56 @@ def list_conversations(
     date_to: datetime | None = None,
     status: str | None = None,
     has_feedback: bool | None = None,
+    tags: str | None = Query(default=None, description="Comma-separated; conversation matches if it has ANY of these tags"),
     cursor: str | None = None,
     limit: int = Query(default=history.DEFAULT_PAGE_SIZE, ge=1, le=history.MAX_PAGE_SIZE),
     principal: SessionPrincipal = Depends(get_verified_principal),
 ):
     company_id = _require_company(principal)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     try:
         with connection() as conn:
-            return history.list_conversations(conn, company_id, date_from, date_to, status, has_feedback, cursor, limit)
+            return history.list_conversations(conn, company_id, date_from, date_to, status, has_feedback, tag_list, cursor, limit)
     except BotError as exc:
         _raise(exc)
+
+
+@router.get("/conversations/export.csv")
+def export_conversations_csv(
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    status: str | None = None,
+    has_feedback: bool | None = None,
+    tags: str | None = Query(default=None),
+    principal: SessionPrincipal = Depends(get_verified_principal),
+):
+    company_id = _require_company(principal)
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    try:
+        with connection() as conn:
+            csv_text = history.export_conversations_csv(conn, company_id, date_from, date_to, status, has_feedback, tag_list)
+    except BotError as exc:
+        _raise(exc)
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="conversations.csv"'},
+    )
+
+
+class TagsRequest(BaseModel):
+    tags: list[str] = Field(default_factory=list, max_length=50)
+
+
+@router.put("/conversations/{conversation_id}/tags")
+def set_conversation_tags(conversation_id: str, body: TagsRequest, principal: SessionPrincipal = Depends(get_verified_principal)):
+    company_id = _require_company(principal)
+    try:
+        with connection() as conn:
+            tags = history.set_conversation_tags(conn, company_id, conversation_id, body.tags)
+    except BotError as exc:
+        _raise(exc)
+    return {"tags": tags}
 
 
 @router.get("/conversations/{conversation_id}")
@@ -347,20 +391,9 @@ def export_conversation(conversation_id: str, principal: SessionPrincipal = Depe
 # --- Tenant data deletion ---------------------------------------------------
 
 
-@router.delete("/account")
-def delete_company_data(request: Request, principal: SessionPrincipal = Depends(get_verified_principal)):
-    """Hard-deletes the company's bot, sources, conversations and usage
-    data (the account itself is closed via DELETE /me). Vectors are removed
-    best-effort here; DELETE /me runs the same purge as a tracked job."""
-    company_id = _require_company(principal)
-    with connection() as conn:
-        with audit_request_context(_request_id(request), company_id, "owner", principal.user_id):
-            result = history.purge_company_data(conn, company_id)
-            write_audit_event(conn, "delete", "bot", target_id=None, safe_metadata=result)
-    try:
-        from app.providers.vector_store import delete_company_vectors
-
-        delete_company_vectors(company_id)
-    except Exception:  # noqa: BLE001 - DB deletion already committed; vector sweep is retried by DELETE /me job
-        pass
-    return {"status": "deleted", "company_id": company_id, **result}
+# NOTE: `DELETE /api/v1/account` was removed on Day 1 as part of the
+# docs/16 route audit (see launch/00-BUILD-HEALTH.md §5). It duplicated
+# `DELETE /api/v1/me` in `app/profile_router.py`, which is the canonical
+# endpoint per docs/16-API-ROUTES.md. The cleanup logic
+# (`app/bots/history.purge_company_data`) still ships; it is now called
+# only from the `company_cleanup` job queued by `DELETE /me`.

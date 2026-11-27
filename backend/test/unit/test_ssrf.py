@@ -4,7 +4,7 @@ call happens, keeping this test offline-safe per docs/11-AGENT-RULES.md
 rule 6."""
 import pytest
 
-from app.security.ssrf_http import SSRFBlocked, validate_url
+from app.security.ssrf_http import SSRFBlocked, fetch, validate_url
 
 
 def test_loopback_ip_is_blocked():
@@ -78,3 +78,33 @@ def test_credentials_in_url_do_not_bypass_host_validation():
     with pytest.raises(SSRFBlocked) as exc_info:
         validate_url("http://attacker:pw@127.0.0.1/")
     assert exc_info.value.code == "private_target_blocked"
+
+
+# --- fetch() (D9.6 security suite) ------------------------------------------
+#
+# fetch() previously called an undefined `_validate_url` name on every
+# invocation (only `validate_url` -- no underscore -- was ever defined),
+# so it raised NameError on every call rather than ever reaching the
+# network. These tests target that exact code path with private/literal
+# IPs (no live network call happens, consistent with the rest of this
+# file) -- they fail loudly with NameError if that regression returns,
+# instead of the bug silently surviving because every test mocked fetch()
+# away.
+
+
+def test_fetch_blocks_private_target_without_raising_nameerror():
+    with pytest.raises(SSRFBlocked) as exc_info:
+        fetch("http://127.0.0.1/")
+    assert exc_info.value.code == "private_target_blocked"
+
+
+def test_fetch_blocks_metadata_endpoint_without_raising_nameerror():
+    with pytest.raises(SSRFBlocked) as exc_info:
+        fetch("http://169.254.169.254/latest/meta-data/")
+    assert exc_info.value.code == "private_target_blocked"
+
+
+def test_fetch_blocks_disallowed_scheme_without_raising_nameerror():
+    with pytest.raises(SSRFBlocked) as exc_info:
+        fetch("ftp://8.8.8.8/")
+    assert exc_info.value.code == "scheme_not_allowed"

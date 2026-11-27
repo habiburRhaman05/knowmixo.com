@@ -1,0 +1,20 @@
+{"bucket": "en/unanswerable", "id": "un-001", "question": "Do you sell dog food?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-002", "question": "What's the CEO's home phone number?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-003", "question": "When will you support crypto payments?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-004", "question": "What's the warranty on the discontinued 2015 Widget?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-005", "question": "Which Formula 1 teams does Acme sponsor?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-006", "question": "Do you have a physical retail store I can visit?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-007", "question": "What's your refund policy for gift cards?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-008", "question": "Can I speak to a live chat agent right now?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-009", "question": "Do you offer student discounts?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-010", "question": "What's the company's mailing address for returns?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-011", "question": "Is there a mobile app I can download?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-012", "question": "What's the maximum order quantity I can place?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-013", "question": "Do you offer price matching against competitors?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-014", "question": "Can I get a VAT invoice for my business?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-015", "question": "What's your policy on data retention and privacy?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-016", "question": "Do you support Zelle as a payment method?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-017", "question": "Is the Widget available in different colors?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-018", "question": "What's the battery life of the Widget?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-019", "question": "Can I upgrade from Free straight to Business, skipping Pro?", "expected_kind": "abstention"}
+{"bucket": "en/unanswerable", "id": "un-020", "question": "Do you have a referral program?", "expected_kind": "abstention"}

@@ -199,7 +199,12 @@ def fail_job_quota(conn, job_id: str, lease_token: uuid.UUID, error_code: str, r
     """Decrements attempts back down -- a quota wait must not count against
     max_attempts (docs/03-TRD.md). The job returns to the queue in
     'quota_wait' state and becomes claimable again once available_at
-    arrives, without having spent one of its limited real retry attempts."""
+    arrives, without having spent one of its limited real retry attempts.
+
+    Since this attempt number is reverted (and will be reused by the next
+    real claim), its job_attempts row is deleted rather than marked ended --
+    leaving it would collide with job_attempts_job_attempt_unique as soon
+    as the job is reclaimed."""
     job = conn.execute(
         "SELECT attempts FROM jobs WHERE id = %s AND lease_token = %s AND state = 'processing'",
         (job_id, str(lease_token)),
@@ -208,8 +213,8 @@ def fail_job_quota(conn, job_id: str, lease_token: uuid.UUID, error_code: str, r
         return False
 
     conn.execute(
-        "UPDATE job_attempts SET ended_at = now(), safe_error = %s WHERE job_id = %s AND attempt = %s",
-        (error_code, job_id, job["attempts"]),
+        "DELETE FROM job_attempts WHERE job_id = %s AND attempt = %s",
+        (job_id, job["attempts"]),
     )
     conn.execute(
         """
@@ -227,7 +232,10 @@ def replay_dead_job(conn, job_id: str) -> bool:
     """Idempotent manual replay: only affects a job actually in 'dead'
     state, so a second call on an already-requeued job is a safe no-op
     (docs/03-TRD.md: "Manual replay creates a new attempt generation ...
-    and remains idempotent")."""
+    and remains idempotent"). Resetting attempts to 0 means the next claim
+    reuses attempt numbers 1, 2, ... from the dead generation, so that
+    generation's job_attempts rows are cleared here -- otherwise the first
+    reclaim after replay collides with job_attempts_job_attempt_unique."""
     row = conn.execute(
         """
         UPDATE jobs
@@ -239,4 +247,7 @@ def replay_dead_job(conn, job_id: str) -> bool:
         """,
         (job_id,),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return False
+    conn.execute("DELETE FROM job_attempts WHERE job_id = %s", (job_id,))
+    return True

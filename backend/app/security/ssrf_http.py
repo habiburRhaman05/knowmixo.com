@@ -42,7 +42,28 @@ def _is_public_ip(ip_str: str) -> bool:
     )
 
 
+def _resolve_and_validate(hostname: str, port: int) -> str:
+    """Returns ONE validated public IP for `hostname`. Blocks the whole
+    hostname if ANY resolved address is private/loopback/link-local/
+    metadata (not just if all of them are) -- conservative by design,
+    since a dual-homed name that resolves to both a public and an
+    internal address is exactly the shape a DNS-rebinding setup uses."""
+    try:
+        resolved = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise SSRFBlocked("dns_resolution_failed", "Could not resolve host.") from exc
+
+    ips = [sockaddr[0] for _family, _type, _proto, _canon, sockaddr in resolved]
+    for ip_str in ips:
+        if not _is_public_ip(ip_str):
+            raise SSRFBlocked("private_target_blocked", "Target resolves to a private, loopback, or metadata address.")
+    return ips[0]
+
+
 def validate_url(url: str) -> str:
+    """Validate-only: for call sites that just need a yes/no SSRF check
+    (the owner HTTP-action CRUD, source URL input) without fetching
+    anything. Returns `url` unchanged on success."""
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_SCHEMES:
         raise SSRFBlocked("scheme_not_allowed", f"URL scheme '{parsed.scheme}' is not allowed.")
@@ -53,46 +74,60 @@ def validate_url(url: str) -> str:
     if port not in ALLOWED_PORTS:
         raise SSRFBlocked("port_not_allowed", f"Port {port} is not allowed.")
 
-    try:
-        resolved = socket.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        raise SSRFBlocked("dns_resolution_failed", "Could not resolve host.") from exc
-
-    for family, _, _, _, sockaddr in resolved:
-        ip_str = sockaddr[0]
-        if not _is_public_ip(ip_str):
-            raise SSRFBlocked("private_target_blocked", "Target resolves to a private, loopback, or metadata address.")
-
+    _resolve_and_validate(parsed.hostname, port)
     return url
 
 
-def fetch(url: str) -> httpx.Response:
-    """Fetches a URL with SSRF validation on the initial target and on
-    every redirect hop. Caps response size by reading in a bounded
-    stream rather than trusting Content-Length.
+def _validate_and_pin(url: str) -> tuple[httpx.URL, str, int]:
+    """Validates `url` and returns (parsed_url, validated_ip, port) for
+    fetch() to connect to directly -- see _pinned_request's docstring for
+    why this closes the DNS-rebinding gap validate_url() alone cannot."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ALLOWED_SCHEMES:
+        raise SSRFBlocked("scheme_not_allowed", f"URL scheme '{parsed.scheme}' is not allowed.")
+    if not parsed.hostname:
+        raise SSRFBlocked("invalid_url", "URL has no hostname.")
 
-    Known residual gap (tracked, not silently ignored): DNS is resolved
-    and validated here, then httpx re-resolves independently when it
-    actually connects. A real DNS-rebinding attacker who changes the
-    answer between these two resolutions could still slip through --
-    closing this fully requires pinning the connection to the exact
-    validated IP (a custom transport/resolver), which is real, nontrivial
-    work deferred to the Phase 6/8 security hardening pass rather than
-    implemented here as a fragile one-off. The redirect-chain and
-    private/loopback/metadata-range checks below are real protection
-    against the common SSRF exploit classes in the interim.
-    """
-    current_url = _validate_url(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if port not in ALLOWED_PORTS:
+        raise SSRFBlocked("port_not_allowed", f"Port {port} is not allowed.")
+
+    ip = _resolve_and_validate(parsed.hostname, port)
+    return httpx.URL(url), ip, port
+
+
+def _pinned_request(client: httpx.Client, parsed_url: httpx.URL, ip: str, port: int) -> httpx.Response:
+    """Connects the TCP socket directly to the already-validated `ip`,
+    never letting httpx/httpcore re-resolve the hostname and potentially
+    get a different (attacker-controlled, now-private) answer between
+    validation and connect -- the classic TOCTOU DNS-rebinding gap. The
+    original hostname is preserved as the Host header and TLS SNI name
+    (`sni_hostname` extension, read by httpcore's connection layer) so
+    virtual-hosted targets and certificate validation both still work
+    correctly against the real hostname, only the socket's destination
+    address is pinned."""
+    hostname = parsed_url.host
+    pinned_url = parsed_url.copy_with(host=ip)
+    return client.get(pinned_url, headers={"Host": hostname}, extensions={"sni_hostname": hostname})
+
+
+def fetch(url: str) -> httpx.Response:
+    """Fetches a URL with SSRF validation AND DNS-rebinding-safe IP
+    pinning on the initial target and on every redirect hop. Caps
+    response size by reading in a bounded stream rather than trusting
+    Content-Length."""
+    current_url, ip, port = _validate_and_pin(url)
 
     with httpx.Client(follow_redirects=False, timeout=REQUEST_TIMEOUT_SECONDS) as client:
         for _ in range(MAX_REDIRECTS + 1):
-            response = client.get(current_url)
+            response = _pinned_request(client, current_url, ip, port)
 
             if response.is_redirect:
                 next_url = response.headers.get("location")
                 if not next_url:
                     raise SSRFBlocked("invalid_redirect", "Redirect with no Location header.")
-                current_url = _validate_url(httpx.URL(current_url).join(next_url).human_repr())
+                joined = current_url.join(next_url)
+                current_url, ip, port = _validate_and_pin(str(joined))
                 continue
 
             _enforce_response_cap(response)

@@ -88,6 +88,45 @@ async def stream_completion(messages: list[dict]) -> AsyncIterator[str]:
         raise LLMError("llm_unreachable") from exc
 
 
+async def complete_json(messages: list[dict], max_tokens: int = 300) -> dict:
+    """Non-streaming JSON-mode call for the rag_v2 stages that need a
+    structured decision, not prose for the visitor (intent, rewrite,
+    grade, verify, postprocess follow-ups -- launch/05-RAG-V2-SPEC.md
+    3.2/3.3/3.6/3.8/3.9). Separate from stream_completion() because these
+    calls are never shown to the user token-by-token and must come back
+    as a single parsed dict, not text deltas."""
+    s = settings()
+    payload = {
+        "model": s.chat_model,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {"Authorization": f"Bearer {s.groq_api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
+            response = await client.post(GROQ_URL, json=payload, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise LLMError("llm_timeout") from exc
+    except httpx.HTTPError as exc:
+        raise LLMError("llm_unreachable") from exc
+
+    if response.status_code == 429:
+        raise LLMQuotaError(int(response.headers.get("retry-after", "60")))
+    if response.status_code >= 500:
+        raise LLMError("llm_provider_error")
+    if response.status_code >= 400:
+        raise LLMError("llm_request_rejected")
+
+    try:
+        content = response.json()["choices"][0]["message"]["content"]
+        return json.loads(content)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise LLMError("llm_response_shape_unexpected") from exc
+
+
 def estimate_tokens(*texts: str) -> int:
     """Cheap upper-bound estimate (~4 chars/token) used only for quota
     accounting, never for billing."""

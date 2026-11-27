@@ -59,7 +59,7 @@ def _make_text_document(conn, company_id: str, bot_id: str, content: str) -> tup
 
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
-    return [[0.1, 0.2, 0.3] for _ in texts]
+    return [[0.1] * 1024 for _ in texts]  # chunks.embedding is vector(1024) -- must match width
 
 
 def _fake_upsert_matching(**kwargs) -> int:
@@ -100,6 +100,16 @@ def test_happy_path_produces_matching_chunk_manifest(db_conn, storage_dir):
     assert chunk_count > 0
     row = db_conn.execute("SELECT count(*) AS n FROM chunks WHERE version_id = %s", (version["id"],)).fetchone()
     assert row["n"] == chunk_count
+
+    # D3.3: dual-write populates pgvector's embedding + language columns,
+    # not just Pinecone via upsert_fn.
+    chunk_rows = db_conn.execute(
+        "SELECT embedding IS NOT NULL AS has_vec, language, tsvector IS NOT NULL AS has_tsvector FROM chunks WHERE version_id = %s",
+        (version["id"],),
+    ).fetchall()
+    assert all(r["has_vec"] for r in chunk_rows)
+    assert all(r["language"] == "en" for r in chunk_rows)
+    assert all(r["has_tsvector"] for r in chunk_rows)
 
 
 def test_upsert_count_mismatch_blocks_ready_with_transient_error(db_conn, storage_dir):

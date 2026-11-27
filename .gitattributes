@@ -1,0 +1,3 @@
+# Launch planning artifacts never ship in release tarballs
+launch/MASTER-PROMPT.md export-ignore
+Lunch.md export-ignore

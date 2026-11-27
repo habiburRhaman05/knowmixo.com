@@ -16,6 +16,8 @@ ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "text/plain",
     "text/markdown",
+    "text/csv",
+    "application/vnd.ms-excel",  # some browsers send this for .csv
     "application/octet-stream",  # browsers often send this; the magic-byte check is authoritative
 }
 
@@ -40,7 +42,7 @@ class UploadGrantRequest(BaseModel):
 def create_upload(body: UploadGrantRequest, principal: SessionPrincipal = Depends(get_verified_principal)):
     company_id = _require_company(principal)
     if body.content_type.split(";")[0].strip().lower() not in ALLOWED_UPLOAD_CONTENT_TYPES:
-        raise HTTPException(status_code=422, detail={"code": "unsupported_file_type", "message": "Allowed types: PDF, DOCX, TXT, MD."})
+        raise HTTPException(status_code=422, detail={"code": "unsupported_file_type", "message": "Allowed types: PDF, DOCX, TXT, MD, CSV."})
     try:
         with connection() as conn:
             result = service.start_file_upload(conn, company_id, body.filename, body.size_bytes)

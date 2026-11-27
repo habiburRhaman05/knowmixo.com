@@ -6,6 +6,7 @@ from psycopg_pool import ConnectionPool
 
 from app.config import settings
 from app.postgres_resilience import get_pg, PostgresResilience
+from app.tenancy import get_current_company
 
 _pool: ConnectionPool | None = None
 _pg_resilience: PostgresResilience | None = None
@@ -36,9 +37,22 @@ def get_pg_resilience() -> PostgresResilience:
 
 @contextmanager
 def connection():
-    """A pooled connection with resilience (retry on transient errors)."""
+    """A pooled connection with resilience (retry on transient errors).
+
+    Applies the current request's tenant context (ADR 002 / app/tenancy.py)
+    as the first statement on every acquired connection, via
+    `set_config(..., true)` so it is transaction-scoped and can never leak
+    to a different request on a reused pooled connection. This is inert
+    today for the live app's pool (still running as the RLS-bypassing
+    owner role -- see migration 0011's docstring for the audit that must
+    happen before switching); it is exercised for real by any connection
+    opened against the `app_user` role, e.g. the RLS regression suite.
+    """
     pg = get_pg_resilience()
     with pg.connection() as conn:
+        company_id = get_current_company()
+        if company_id is not None:
+            conn.execute("SELECT set_config('app.company_id', %s, true)", (company_id,))
         yield conn
 
 

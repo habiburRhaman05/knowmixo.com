@@ -99,6 +99,17 @@ def test_owner_b_cannot_publish_using_owner_a_source_version_id(db_conn):
     db_conn.execute("UPDATE document_versions SET status = 'ready' WHERE id = %s", (version_id,))
     db_conn.commit()
 
+    # B needs its own bot to exist before publish can even reach the
+    # cross-tenant ownership check -- get_bot() 404s with "no_bot" first
+    # otherwise, which isn't what this test is probing. A bot is lazily
+    # created on a company's first source (app/sources/service.py), so
+    # give B one of its own.
+    client.post(
+        "/api/v1/sources/text",
+        json={"title": "B's own doc", "text": "Unrelated content so B has a bot."},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+
     r = client.post(
         "/api/v1/bot/publish",
         json={"selected_document_version_ids": [version_id]},
