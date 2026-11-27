@@ -78,23 +78,28 @@ export default function KnowledgePage() {
   );
 
   const load = React.useCallback(
-    async (opts: { reset?: boolean } = {}) => {
+    async (opts: { reset?: boolean; silent?: boolean } = {}) => {
       const params = new URLSearchParams();
       if (filter.state) params.set("state", filter.state);
       if (filter.type) params.set("type", filter.type);
       if (filter.q) params.set("q", filter.q);
       params.set("limit", String(PAGE_SIZE));
       if (!opts.reset && cursor) params.set("cursor", cursor);
-      setLoading(true);
+      // `silent` (used by the background poll below) must NOT flip the
+      // page into its full skeleton state every tick -- the data is
+      // already on screen, this is just a quiet status refresh. Only a
+      // real user-initiated load (first mount, filter change, "load
+      // more") should show the loading UI.
+      if (!opts.silent) setLoading(true);
       setError(null);
       try {
         const data = await apiFetch<DocumentListResponse>(`/api/bff/documents?${params.toString()}`);
         setItems((prev) => (opts.reset || !prev ? data.items : [...prev, ...data.items]));
         setCursor(data.next_cursor);
       } catch (e) {
-        setError(e);
+        if (!opts.silent) setError(e);
       } finally {
-        setLoading(false);
+        if (!opts.silent) setLoading(false);
       }
     },
     // We intentionally don't depend on `cursor` here -- "load more" passes
@@ -115,7 +120,7 @@ export default function KnowledgePage() {
     items?.some((i) => i.status !== "ready" && i.status !== "failed" && i.status !== "retired") ?? false;
   React.useEffect(() => {
     if (!hasInFlight) return;
-    const id = window.setInterval(() => void load({ reset: true }), 3000);
+    const id = window.setInterval(() => void load({ reset: true, silent: true }), 3000);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasInFlight]);
@@ -136,6 +141,21 @@ export default function KnowledgePage() {
         });
       }
       toast({ tone: "success", title: "Reprocessing queued" });
+      await load({ reset: true });
+    } catch (e) {
+      const info = describeError(e);
+      toast({ tone: "danger", title: info.title, description: info.message });
+    }
+  }
+
+  async function onToggleDisabled(row: DocumentRow) {
+    const nextDisabled = !row.disabled_at;
+    try {
+      await apiFetch(`/api/bff/documents/${row.id}`, {
+        method: "PATCH",
+        json: { disabled: nextDisabled },
+      });
+      toast({ tone: "success", title: nextDisabled ? "Source disabled" : "Source re-enabled" });
       await load({ reset: true });
     } catch (e) {
       const info = describeError(e);
@@ -249,6 +269,7 @@ export default function KnowledgePage() {
                     onOpen={(d) => setDetail(d)}
                     onRefresh={onRetryOrRefresh}
                     onDelete={onDelete}
+                    onToggleDisabled={onToggleDisabled}
                   />
                 ))}
               </ul>

@@ -25,6 +25,7 @@ import { Input } from "@/components/ui/input";
 import { apiFetch } from "@/lib/api-client";
 import { describeError } from "@/lib/errors";
 import { useToast } from "@/components/ui/toast";
+import { useBot, useSetBotData } from "@/lib/hooks/use-bot";
 import {
   type BotResponse,
   type DocumentListResponse,
@@ -37,7 +38,9 @@ type DomainsResponse = { allowed_domains: string[] };
 
 export default function PublishPage() {
   const { toast } = useToast();
-  const [bot, setBot] = React.useState<BotResponse | null>(null);
+  const botQuery = useBot();
+  const setBotData = useSetBotData();
+  const bot = botQuery.data ?? null;
   const [ready, setReady] = React.useState<DocumentRow[] | null>(null);
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [publishing, setPublishing] = React.useState(false);
@@ -49,13 +52,11 @@ export default function PublishPage() {
   React.useEffect(() => {
     void (async () => {
       try {
-        const [botResp, listResp, embedResp, domainResp] = await Promise.all([
-          apiFetch<BotResponse>("/api/bff/bot"),
+        const [listResp, embedResp, domainResp] = await Promise.all([
           apiFetch<DocumentListResponse>("/api/bff/documents?state=ready&limit=100"),
           apiFetch<EmbedResponse>("/api/bff/bot/embed").catch(() => null),
           apiFetch<DomainsResponse>("/api/bff/bot/domains").catch(() => ({ allowed_domains: [] })),
         ]);
-        setBot(botResp);
         setReady(listResp.items);
         setSelected(new Set(listResp.items.map((i) => i.version_id!).filter(Boolean) as string[]));
         if (embedResp) setEmbed(embedResp);
@@ -92,7 +93,7 @@ export default function PublishPage() {
       );
       toast({ tone: "success", title: `Published version ${resp.version}` });
       const refreshed = await apiFetch<BotResponse>("/api/bff/bot");
-      setBot(refreshed);
+      setBotData(refreshed);
       const embedResp = await apiFetch<EmbedResponse>("/api/bff/bot/embed");
       setEmbed(embedResp);
     } catch (e) {
@@ -109,7 +110,7 @@ export default function PublishPage() {
     try {
       await apiFetch("/api/bff/bot/unpublish", { method: "POST" });
       const refreshed = await apiFetch<BotResponse>("/api/bff/bot");
-      setBot(refreshed);
+      setBotData(refreshed);
       toast({ tone: "success", title: "Assistant unpublished" });
     } catch (e) {
       const info = describeError(e);

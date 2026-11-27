@@ -76,9 +76,34 @@ def remove_member(conn, company_id: str, user_id: str) -> None:
     conn.execute("DELETE FROM memberships WHERE company_id = %s AND user_id = %s", (company_id, user_id))
 
 
+def _check_member_quota(conn, company_id: str) -> None:
+    """Billing plan-limit enforcement (K.1): `plans.limits.members` existed
+    with zero enforcement. Counts existing members plus pending (not yet
+    accepted/revoked/expired) invites, so a seat can't be oversold before
+    the invite is even accepted."""
+    from app.billing.entitlements import entitlements
+
+    limit = entitlements(company_id).get("members")
+    if limit is None:
+        return
+    count = conn.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM memberships WHERE company_id = %s) +
+            (SELECT COUNT(*) FROM invites WHERE company_id = %s AND accepted_at IS NULL
+                AND revoked_at IS NULL AND expires_at > now()) AS n
+        """,
+        (company_id, company_id),
+    ).fetchone()["n"]
+    if int(count) >= int(limit):
+        raise TeamError(402, "plan_limit_members", f"Your plan allows up to {limit} team members. Upgrade to add more.")
+
+
 def create_invite(conn, company_id: str, invited_by: str, email: str, role: str) -> dict:
     if role not in INVITABLE_ROLES:
         raise TeamError(422, "invalid_role", "Role must be admin, agent, or viewer.")
+
+    _check_member_quota(conn, company_id)
 
     normalized = email.strip().lower()
     existing_member = conn.execute(

@@ -3,6 +3,8 @@ import { Inter, Plus_Jakarta_Sans } from "next/font/google";
 import * as React from "react";
 import "./globals.css";
 import { ToastProvider } from "@/components/ui/toast";
+import { CookieConsent } from "@/components/layout/cookie-consent";
+import { QueryProvider } from "@/components/providers/query-provider";
 import { publicEnv } from "@/lib/env";
 
 const sans = Inter({
@@ -56,9 +58,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         >
           Skip to main content
         </a>
-        <ToastProvider>
-          <div id="main">{children}</div>
-        </ToastProvider>
+        <QueryProvider>
+          <ToastProvider>
+            <div id="main">{children}</div>
+          </ToastProvider>
+          <CookieConsent />
+        </QueryProvider>
       </body>
     </html>
   );

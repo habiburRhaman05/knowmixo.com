@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth.service import SessionPrincipal
+from app.billing.entitlements import require_feature
 from app.deps import get_verified_principal
 from app.public_api.keys import ALL_SCOPES, create_key, list_keys, revoke_key
 
@@ -19,6 +20,10 @@ class CreateKeyRequest(BaseModel):
 
 @router.post("")
 async def create_api_key(body: CreateKeyRequest, principal: SessionPrincipal = Depends(get_verified_principal)):
+    # K.1 launch punch-list item: the public API is a Scale+ plan feature
+    # (launch/09-BILLING-PAYMENTS.md plan matrix) -- `require_feature` had
+    # zero callers until this change, so any plan could mint API keys.
+    require_feature(principal.company_id, "api")
     try:
         return create_key(principal.company_id, principal.user_id, body.name, body.scopes)
     except ValueError as exc:

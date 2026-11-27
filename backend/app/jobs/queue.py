@@ -30,6 +30,16 @@ def enqueue_job(
             company_id, kind, payload or {}, document_version_id
         )
 
+    # `jobs` has no `payload` column -- `checkpoint_ref` is the only
+    # free-form JSON column a claimed job actually carries (see
+    # app.jobs.loop.process_one, which rehydrates job["payload"] from it).
+    # Several callers only ever set `payload=`, so without this, whatever
+    # they passed was silently discarded at enqueue time: a genuine,
+    # confirmed bug (escalation_dispatch, escalation_timeout_check,
+    # send_dunning_email, channel_inbound_message all enqueue via
+    # `payload=` alone).
+    stored_ref = checkpoint_ref if checkpoint_ref is not None else (payload or None)
+
     job_id, is_new = enqueue_job_idempotent(
         conn,
         company_id=company_id,
@@ -38,6 +48,6 @@ def enqueue_job(
         document_version_id=document_version_id,
         idempotency_key=idempotency_key,
         max_attempts=max_attempts,
-        checkpoint_ref=checkpoint_ref,
+        checkpoint_ref=stored_ref,
     )
     return job_id, is_new

@@ -250,13 +250,25 @@ def escalation_dispatch_executor(conn, job: dict, heartbeat: Callable[[], bool])
     dispatch_escalation(escalation_id)
 
 
+def escalation_timeout_check_executor(conn, job: dict, heartbeat: Callable[[], bool]) -> None:
+    """F.7: enqueued by app/jobs/escalation_timeout_sweep.py for every
+    unacknowledged escalation due a check (retry/escalate/dead per the
+    SLA table in app.escalation.state_machine)."""
+    from app.escalation.worker import check_timeout
+    payload = job.get("payload") or {}
+    escalation_id = payload.get("escalation_id")
+    if not escalation_id:
+        raise PermanentJobError("missing_escalation_id")
+    check_timeout(escalation_id)
+
+
 def send_dunning_email_executor(conn, job: dict, heartbeat: Callable[[], bool]) -> None:
     payload = job.get("payload") or {}
     stripe_invoice_id = payload.get("stripe_invoice_id")
     attempt = payload.get("attempt", 1)
     company_id = job["company_id"]
     row = conn.execute(
-        "SELECT u.email, u.name FROM users u JOIN companies c ON c.owner_id = u.id WHERE c.id = %s",
+        "SELECT u.email, u.name FROM users u JOIN companies c ON c.owner_user_id = u.id WHERE c.id = %s",
         (company_id,),
     ).fetchone()
     if not row:
@@ -281,6 +293,7 @@ DEFAULT_EXECUTORS: dict[str, Callable] = {
     "process_stripe_events": process_stripe_events_executor,
     "send_dunning_email": send_dunning_email_executor,
     "escalation_dispatch": escalation_dispatch_executor,
+    "escalation_timeout_check": escalation_timeout_check_executor,
     "channel_inbound_message": channel_inbound_message_executor,
     "compute_gaps": compute_gaps_executor,
     "evaluate_alerts": evaluate_alerts_executor,

@@ -25,7 +25,12 @@ import { Badge } from "@/components/ui/badge";
 import { apiFetch } from "@/lib/api-client";
 import { describeError } from "@/lib/errors";
 import { useToast } from "@/components/ui/toast";
-import { type ConversationDetail } from "@/lib/types";
+import {
+  type ConversationDetail,
+  type ConversationStatus,
+  CONVERSATION_STATUS_LABEL,
+  CONVERSATION_STATUS_TONE,
+} from "@/lib/types";
 import { fromNow } from "@/lib/utils";
 
 export default function ConversationDetailPage() {
@@ -101,7 +106,9 @@ export default function ConversationDetailPage() {
               <Card>
                 <CardHeader className="border-b border-border">
                   <div className="flex items-center gap-2">
-                    <Badge tone={data.status === "active" ? "primary" : "neutral"}>{data.status}</Badge>
+                    <Badge tone={CONVERSATION_STATUS_TONE[data.status as ConversationStatus] ?? "neutral"}>
+                      {CONVERSATION_STATUS_LABEL[data.status as ConversationStatus] ?? data.status}
+                    </Badge>
                     <span className="text-xs text-muted-foreground">Started {fromNow(data.created_at)}</span>
                   </div>
                   <CardTitle className="text-lg">Transcript</CardTitle>

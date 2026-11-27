@@ -7,8 +7,12 @@ import {
   BookOpen,
   Bot,
   MessageSquare,
+  Inbox,
   Gauge,
   Settings,
+  Lightbulb,
+  FlaskConical,
+  Webhook,
   ChevronsUpDown,
   Sparkles,
   Rocket,
@@ -19,7 +23,7 @@ import { Logo } from "@/components/ui/icon-logo";
 import { Avatar, initialsFor } from "@/components/ui/avatar";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip } from "@/components/ui/tooltip";
-import { apiFetch } from "@/lib/api-client";
+import { useCompany } from "@/lib/hooks/use-company";
 import { cn } from "@/lib/utils";
 
 type NavItem = { href: string; label: string; icon: LucideIcon; shortcut?: string };
@@ -37,38 +41,25 @@ const SECTIONS: Array<{ title: string; items: NavItem[] }> = [
     items: [
       { href: "/knowledge", label: "Knowledge", icon: BookOpen, shortcut: "K" },
       { href: "/chatbot", label: "Chatbot", icon: Bot, shortcut: "B" },
+      { href: "/playground", label: "Playground", icon: FlaskConical, shortcut: "P" },
+      { href: "/actions", label: "Actions", icon: Webhook, shortcut: "A" },
     ],
   },
   {
     title: "Operate",
     items: [
+      { href: "/inbox", label: "Inbox", icon: Inbox, shortcut: "I" },
       { href: "/conversations", label: "Conversations", icon: MessageSquare, shortcut: "C" },
+      { href: "/quality", label: "Quality", icon: Lightbulb, shortcut: "Q" },
       { href: "/usage", label: "Usage", icon: Gauge, shortcut: "U" },
       { href: "/settings", label: "Settings", icon: Settings, shortcut: "," },
     ],
   },
 ];
 
-type Company = { id: string; name: string } | null;
-
 export function Sidebar() {
   const pathname = usePathname();
-  const [company, setCompany] = React.useState<Company>(null);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const c = await apiFetch<{ id: string; name: string }>("/api/bff/company");
-        if (!cancelled) setCompany(c);
-      } catch {
-        /* no company yet */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { data: company } = useCompany();
 
   return (
     <aside className="hidden h-screen w-64 shrink-0 border-r border-border bg-card md:sticky md:top-0 md:flex md:flex-col">

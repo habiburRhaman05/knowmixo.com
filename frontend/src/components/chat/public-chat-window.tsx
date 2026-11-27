@@ -333,6 +333,9 @@ export function PublicChatWindow({ publicId, onClose, layout = "hosted" }: Props
       </div>
 
       <footer className="border-t border-border bg-card p-3">
+        <p className="mb-1.5 text-center text-[10px] leading-tight text-muted-foreground">
+          You&apos;re chatting with an AI assistant. Responses may be inaccurate.
+        </p>
         <div className="flex items-end gap-2">
           <textarea
             value={input}

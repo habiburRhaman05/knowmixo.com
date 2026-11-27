@@ -37,7 +37,7 @@ import { ERROR_CODE_COPY, type UploadGrantResponse, type CrawlJobResponse } from
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 
-const ALLOWED_EXT = [".pdf", ".docx", ".txt", ".md"] as const;
+const ALLOWED_EXT = [".pdf", ".docx", ".txt", ".md", ".csv"] as const;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 type Props = { open: boolean; onOpenChange: (open: boolean) => void; onDone: () => void };
@@ -45,7 +45,7 @@ type Props = { open: boolean; onOpenChange: (open: boolean) => void; onDone: () 
 type Tab = "file" | "text" | "faq" | "url" | "crawl";
 
 const TABS: Array<{ key: Tab; label: string; icon: React.ElementType; description: string }> = [
-  { key: "file", label: "Upload file", icon: Upload, description: "PDF, DOCX, TXT or Markdown, up to 10 MB." },
+  { key: "file", label: "Upload file", icon: Upload, description: "PDF, DOCX, TXT, Markdown or CSV, up to 10 MB." },
   { key: "text", label: "Paste text", icon: FileText, description: "Paste or write content directly." },
   { key: "faq", label: "FAQ", icon: FileText, description: "Question and answer pairs." },
   { key: "url", label: "Single URL", icon: Link2, description: "One page from your site or help center." },

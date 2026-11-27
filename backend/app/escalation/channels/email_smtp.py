@@ -22,6 +22,12 @@ def send_escalation_email(
         return None
 
     subject = f"{'URGENT' if severity == 'critical' else 'Important'} — {brand_name} escalation"
+    # CAN-SPAM (K.15): same sender-identification + postal-address footer
+    # as app/email.py -- this channel has its own SMTP send path and
+    # doesn't go through send_email(), so the footer has to be applied
+    # here too, not just centrally.
+    from app.email import COMPANY_POSTAL_ADDRESS
+
     body = f"""{brand_name} — {'URGENT' if severity == 'critical' else 'Important'}
 
 Reason: {reason_summary}
@@ -30,6 +36,10 @@ Summary: {ai_summary[:300]}
 Acknowledge: {deep_link_url}
 
 This is an automated escalation alert from {brand_name}.
+
+---
+Knowmivo · {COMPANY_POSTAL_ADDRESS}
+You're receiving this because you're a configured escalation contact for this account.
 """
 
     msg = EmailMessage()

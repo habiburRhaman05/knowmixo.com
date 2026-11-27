@@ -50,7 +50,7 @@ def _version_ids_for_scope(conn, scope: Scope) -> list[str]:
             """
             SELECT dv.id FROM documents d
             JOIN document_versions dv ON dv.id = d.active_version_id
-            WHERE d.company_id = %s AND d.deleted_at IS NULL AND dv.status = 'ready'
+            WHERE d.company_id = %s AND d.deleted_at IS NULL AND d.disabled_at IS NULL AND dv.status = 'ready'
             """,
             (scope.company_id,),
         ).fetchall()
@@ -61,7 +61,7 @@ def _version_ids_for_scope(conn, scope: Scope) -> list[str]:
             FROM publication_sources ps
             JOIN document_versions dv ON dv.id = ps.document_version_id
             JOIN documents d ON d.id = dv.document_id
-            WHERE ps.publication_id = %s AND dv.status = 'ready' AND d.deleted_at IS NULL
+            WHERE ps.publication_id = %s AND dv.status = 'ready' AND d.deleted_at IS NULL AND d.disabled_at IS NULL
             """,
             (scope.publication_id,),
         ).fetchall()

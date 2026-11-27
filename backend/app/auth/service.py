@@ -13,6 +13,7 @@ docs/11-AGENT-RULES.md):
   - Google sign-in never silently links to an existing email/password
     account -- a collision requires the explicit /me/oauth/google/link flow.
 """
+import logging
 from dataclasses import dataclass
 
 from app.email import (
@@ -20,6 +21,21 @@ from app.email import (
     send_password_reset_email,
     send_verification_email,
 )
+
+log = logging.getLogger(__name__)
+
+
+def _send_auth_email(send_fn, *args) -> None:
+    """Auth emails (verification/reset/change-confirmation) must never turn
+    a transient SMTP hiccup into a 500 on signup/login/account flows -- the
+    account mutation has already committed by the time these are called, so
+    failing here would leave a confusing half-done account with no way for
+    the owner to know. Same resilience pattern as team invites and
+    escalation emails."""
+    try:
+        send_fn(*args)
+    except Exception:
+        log.exception("failed to send auth email via %s", getattr(send_fn, "__name__", send_fn))
 from app.security.passwords import hash_password, verify_password
 from app.security.tokens import (
     RESET_PASSWORD_TTL_SECONDS,
@@ -264,7 +280,7 @@ def signup(conn, email: str, password: str, name: str) -> None:
 
     user, _company = _create_user_with_company(conn, email, name, hash_password(password))
     token = _create_auth_token(conn, user["id"], "verify_email", VERIFY_EMAIL_TTL_SECONDS)
-    send_verification_email(email, token)
+    _send_auth_email(send_verification_email, email, token)
 
 
 def login_with_password(conn, email: str, password: str) -> dict:
@@ -305,7 +321,7 @@ def resend_verification(conn, email: str) -> None:
     if _recent_token_within_cooldown(conn, user["id"], "verify_email", RESEND_VERIFICATION_COOLDOWN_SECONDS):
         return  # Cooldown: silent no-op, still a generic accepted response.
     token = _create_auth_token(conn, user["id"], "verify_email", VERIFY_EMAIL_TTL_SECONDS)
-    send_verification_email(email, token)
+    _send_auth_email(send_verification_email, email, token)
 
 
 def forgot_password(conn, email: str) -> None:
@@ -315,7 +331,7 @@ def forgot_password(conn, email: str) -> None:
     if _recent_token_within_cooldown(conn, user["id"], "reset_password", FORGOT_PASSWORD_COOLDOWN_SECONDS):
         return  # Cooldown: silent no-op, still a generic accepted response.
     token = _create_auth_token(conn, user["id"], "reset_password", RESET_PASSWORD_TTL_SECONDS)
-    send_password_reset_email(email, token)
+    _send_auth_email(send_password_reset_email, email, token)
 
 
 def reset_password(conn, token: str, new_password: str) -> None:
@@ -438,7 +454,7 @@ def request_email_change(conn, user_id: str, new_email: str, current_password: s
     token = _create_auth_token(
         conn, user_id, "change_email", VERIFY_EMAIL_TTL_SECONDS, pending_email=new_email
     )
-    send_email_change_confirmation(new_email, token)
+    _send_auth_email(send_email_change_confirmation, new_email, token)
 
 
 def confirm_email_change(conn, token: str) -> None:

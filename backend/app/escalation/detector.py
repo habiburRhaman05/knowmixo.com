@@ -9,6 +9,7 @@ import uuid
 
 from app.db import connection
 from app.escalation.rules import evaluate_rules
+from app.jobs.queue import enqueue_job
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +45,8 @@ def detect_and_create(
                     company_id, conversation_id, rule_id, severity,
                     reason_summary, ai_summary, key_details, state, deep_link_jti
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, 'created', %s)
-                ON CONFLICT ON CONSTRAINT escalations_dedupe DO NOTHING
+                ON CONFLICT (conversation_id, severity, date_trunc('minute', created_at AT TIME ZONE 'UTC'))
+                DO NOTHING
                 RETURNING id
                 """,
                 (
@@ -57,7 +59,21 @@ def detect_and_create(
                 ),
             ).fetchone()
             if row:
-                return str(row["id"])
+                escalation_id = str(row["id"])
+                # Launch-blocker fix (K.1/F.7): this INSERT used to be the
+                # entire effect of an escalation -- nothing anywhere ever
+                # enqueued the `escalation_dispatch` job, so a triggered
+                # escalation sat in state='created' forever and no contact
+                # was ever actually notified, despite the tool's reply
+                # telling the visitor "a human has been notified". Enqueued
+                # in the SAME transaction as the INSERT so a crash between
+                # the two can't silently drop the notification.
+                enqueue_job(
+                    conn, company_id, kind="escalation_dispatch",
+                    payload={"escalation_id": escalation_id},
+                    idempotency_key=f"escalation_dispatch:{escalation_id}",
+                )
+                return escalation_id
             return None
     except Exception:
         log.exception("failed to create escalation")

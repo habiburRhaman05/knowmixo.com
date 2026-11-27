@@ -46,7 +46,15 @@ type MeResponse = {
  *   - A command-bar pill with the ⌘K hint (opens a lightweight palette).
  *   - A notification bell with a pulse when something is new.
  */
-export function TopBar({ title, description }: { title: string; description?: string }) {
+export function TopBar({
+  title,
+  description,
+  actions,
+}: {
+  title: string;
+  description?: string;
+  actions?: React.ReactNode;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const { toast } = useToast();
@@ -138,6 +146,8 @@ export function TopBar({ title, description }: { title: string; description?: st
               <p className="truncate text-xs text-muted-foreground">{description}</p>
             )}
           </nav>
+
+          {actions && <div className="hidden items-center gap-2 sm:flex">{actions}</div>}
 
           <button
             type="button"

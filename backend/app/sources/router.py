@@ -92,8 +92,11 @@ class TextSourceRequest(BaseModel):
 @router.post("/sources/text", status_code=202)
 def create_text_source(body: TextSourceRequest, principal: SessionPrincipal = Depends(get_verified_principal)):
     company_id = _require_company(principal)
-    with connection() as conn:
-        document_id, job_id = service.create_text_source(conn, company_id, body.title, body.text)
+    try:
+        with connection() as conn:
+            document_id, job_id = service.create_text_source(conn, company_id, body.title, body.text)
+    except SourceError as exc:
+        _raise(exc)
     return {"document_id": document_id, "job_id": job_id}
 
 
@@ -110,10 +113,13 @@ class FAQSourceRequest(BaseModel):
 @router.post("/sources/faqs", status_code=202)
 def create_faq_source(body: FAQSourceRequest, principal: SessionPrincipal = Depends(get_verified_principal)):
     company_id = _require_company(principal)
-    with connection() as conn:
-        document_id, job_id = service.create_faq_source(
-            conn, company_id, body.title, [item.model_dump() for item in body.items]
-        )
+    try:
+        with connection() as conn:
+            document_id, job_id = service.create_faq_source(
+                conn, company_id, body.title, [item.model_dump() for item in body.items]
+            )
+    except SourceError as exc:
+        _raise(exc)
     return {"document_id": document_id, "job_id": job_id}
 
 
@@ -237,6 +243,8 @@ def get_document(document_id: str, principal: SessionPrincipal = Depends(get_ver
 
 class DocumentPatch(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
+    disabled: bool | None = None
+    tags: list[str] | None = Field(default=None, max_length=50)
 
 
 @router.patch("/documents/{document_id}")
@@ -246,6 +254,10 @@ def patch_document(document_id: str, body: DocumentPatch, principal: SessionPrin
         with connection() as conn:
             if body.title is not None:
                 service.rename_document(conn, company_id, document_id, body.title)
+            if body.disabled is not None:
+                service.set_document_disabled(conn, company_id, document_id, body.disabled)
+            if body.tags is not None:
+                service.set_document_tags(conn, company_id, document_id, body.tags)
             row = service.get_document(conn, company_id, document_id)
     except SourceError as exc:
         _raise(exc)

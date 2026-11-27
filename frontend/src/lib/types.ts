@@ -38,6 +38,9 @@ export type DocumentRow = {
   chunk_count: number | null;
   ready_at: string | null;
   created_at: string;
+  size_bytes: number | null;
+  disabled_at: string | null;
+  tags: string[];
 };
 
 export type DocumentListResponse = {
@@ -88,6 +91,15 @@ export type BotResponse = {
   active_publication_id: string | null;
 };
 
+export type CompanyResponse = {
+  id: string;
+  name: string;
+  website: string | null;
+  industry: string | null;
+  contact: string | null;
+  logo_key: string | null;
+};
+
 export type LeadFormResponse = {
   id: string;
   name: string;
@@ -110,9 +122,33 @@ export type EmbedResponse = {
   hosted_chat_url: string;
 };
 
+/**
+ * "bot"/"queued"/"assigned"/"resolved" (the handoff state machine) --
+ * NOT "active"/"closed". That older pair was a conversation-lifecycle
+ * flag nothing ever actually wrote; migration 0022 repurposed this same
+ * column for handoff state, and app/bots/history.py's filter validation
+ * now rejects anything outside this set.
+ */
+export type ConversationStatus = "bot" | "queued" | "assigned" | "resolved";
+
+export const CONVERSATION_STATUS_LABEL: Record<ConversationStatus, string> = {
+  bot: "Bot",
+  queued: "Queued",
+  assigned: "Assigned",
+  resolved: "Resolved",
+};
+
+export const CONVERSATION_STATUS_TONE: Record<ConversationStatus, "neutral" | "warning" | "primary" | "success"> = {
+  bot: "neutral",
+  queued: "warning",
+  assigned: "primary",
+  resolved: "success",
+};
+
 export type ConversationListItem = {
   id: string;
-  status: "active" | "closed";
+  status: ConversationStatus;
+  tags: string[];
   created_at: string;
   updated_at: string;
   message_count: number;

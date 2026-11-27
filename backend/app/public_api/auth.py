@@ -7,6 +7,7 @@ bucket, or let one key dodge its limit by rotating source IPs.
 """
 from fastapi import Depends, Header
 
+from app.billing.entitlements import entitlements
 from app.public_api.keys import ApiKeyPrincipal, resolve_api_key
 from app.public_api.problem_details import PublicAPIError
 from app.redis_resilience import RateLimiter, get_redis
@@ -21,6 +22,12 @@ def get_api_key_principal(authorization: str | None = Header(default=None)) -> A
     principal = resolve_api_key(token) if token else None
     if not principal:
         raise PublicAPIError(401, "invalid_api_key", "Invalid or revoked API key.")
+
+    # K.1: re-checked per request, not just at key-creation time, so a key
+    # minted on a Scale+ plan stops working the moment the company
+    # downgrades off a plan with the `api` feature.
+    if not entitlements(principal.company_id).get("api"):
+        raise PublicAPIError(403, "feature_not_available", "Your plan does not include public API access.")
 
     try:
         allowed, _remaining = RateLimiter(get_redis(), "public_api").check_limit(principal.key_id, RATE_LIMIT_PER_MINUTE, 60)

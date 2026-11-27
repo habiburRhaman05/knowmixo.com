@@ -31,6 +31,40 @@ def _require_uuid(value: str, code: str, message: str) -> None:
         raise SourceError(404, code, message) from exc
 
 
+def _check_source_quota(conn, company_id: str, additional: int = 1, additional_bytes: int = 0) -> None:
+    """Billing plan-limit enforcement (K.1 launch punch-list item):
+    `plans.limits.sources`/`storage_mb` existed with zero enforcement
+    anywhere -- a Free-plan company could add unlimited sources. Raised
+    before any document row is written so a blocked attempt leaves no
+    partial state behind."""
+    from app.billing.entitlements import entitlements
+
+    ent = entitlements(company_id)
+    sources_limit = ent.get("sources")
+    if sources_limit is not None:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM documents WHERE company_id = %s AND deleted_at IS NULL",
+            (company_id,),
+        ).fetchone()["n"]
+        if int(count) + additional > int(sources_limit):
+            raise SourceError(
+                402, "plan_limit_sources",
+                f"Your plan allows up to {sources_limit} knowledge sources. Upgrade to add more.",
+            )
+
+    storage_limit_mb = ent.get("storage_mb")
+    if storage_limit_mb is not None and additional_bytes:
+        used_bytes = conn.execute(
+            "SELECT COALESCE(SUM(size_bytes), 0) AS n FROM documents WHERE company_id = %s AND deleted_at IS NULL",
+            (company_id,),
+        ).fetchone()["n"]
+        if int(used_bytes) + additional_bytes > int(storage_limit_mb) * 1024 * 1024:
+            raise SourceError(
+                402, "plan_limit_storage",
+                f"Your plan allows {storage_limit_mb} MB of knowledge storage. Upgrade to add more.",
+            )
+
+
 def _create_document_and_version(conn, company_id: str, bot_id: str, kind: str, title: str, source_url: str | None = None) -> tuple[str, str, int]:
     document = conn.execute(
         """
@@ -55,6 +89,7 @@ def _create_document_and_version(conn, company_id: str, bot_id: str, kind: str, 
 
 
 def start_file_upload(conn, company_id: str, filename: str, size_bytes: int) -> dict:
+    _check_source_quota(conn, company_id, additional_bytes=size_bytes)
     bot_id = get_or_create_bot_for_company(conn, company_id)
     document_id, version_id, version = _create_document_and_version(conn, company_id, bot_id, "file", filename)
 
@@ -106,8 +141,8 @@ def complete_upload(conn, company_id: str, document_id: str, grant_id: str, idem
     ).fetchone()
 
     conn.execute(
-        "UPDATE documents SET storage_key = %s, updated_at = now() WHERE id = %s",
-        (result["storage_key"], document_id),
+        "UPDATE documents SET storage_key = %s, size_bytes = %s, updated_at = now() WHERE id = %s",
+        (result["storage_key"], result["size_bytes"], document_id),
     )
     conn.execute(
         "UPDATE document_versions SET checksum = %s WHERE id = %s",
@@ -128,11 +163,12 @@ def complete_upload(conn, company_id: str, document_id: str, grant_id: str, idem
 
 
 def create_text_source(conn, company_id: str, title: str, text: str) -> tuple[str, str]:
+    _check_source_quota(conn, company_id, additional_bytes=len(text.encode("utf-8")))
     bot_id = get_or_create_bot_for_company(conn, company_id)
     document_id, version_id, version = _create_document_and_version(conn, company_id, bot_id, "text", title)
 
     result = storage.write_text_content(company_id, document_id, version, text, suffix=".txt")
-    conn.execute("UPDATE documents SET storage_key = %s WHERE id = %s", (result["storage_key"], document_id))
+    conn.execute("UPDATE documents SET storage_key = %s, size_bytes = %s WHERE id = %s", (result["storage_key"], result["size_bytes"], document_id))
     conn.execute("UPDATE document_versions SET checksum = %s WHERE id = %s", (result["checksum"], version_id))
 
     job_id, _is_new = enqueue_job(conn, company_id, kind="ingest_document", document_version_id=version_id)
@@ -140,11 +176,12 @@ def create_text_source(conn, company_id: str, title: str, text: str) -> tuple[st
 
 
 def create_faq_source(conn, company_id: str, title: str, items: list[dict]) -> tuple[str, str]:
+    _check_source_quota(conn, company_id, additional_bytes=len(json.dumps(items).encode("utf-8")))
     bot_id = get_or_create_bot_for_company(conn, company_id)
     document_id, version_id, version = _create_document_and_version(conn, company_id, bot_id, "faq", title)
 
     result = storage.write_text_content(company_id, document_id, version, json.dumps(items), suffix=".json")
-    conn.execute("UPDATE documents SET storage_key = %s WHERE id = %s", (result["storage_key"], document_id))
+    conn.execute("UPDATE documents SET storage_key = %s, size_bytes = %s WHERE id = %s", (result["storage_key"], result["size_bytes"], document_id))
     conn.execute("UPDATE document_versions SET checksum = %s WHERE id = %s", (result["checksum"], version_id))
 
     job_id, _is_new = enqueue_job(conn, company_id, kind="ingest_document", document_version_id=version_id)
@@ -152,6 +189,7 @@ def create_faq_source(conn, company_id: str, title: str, items: list[dict]) -> t
 
 
 def create_url_source(conn, company_id: str, url: str) -> tuple[str, str]:
+    _check_source_quota(conn, company_id)
     try:
         ssrf_validate_url(url)
     except SSRFBlocked as exc:
@@ -180,6 +218,8 @@ def create_crawl_source(conn, company_id: str, root_url: str) -> dict:
 
     if not pages:
         raise SourceError(422, "no_pages_discovered", "No pages were discovered at this URL.")
+
+    _check_source_quota(conn, company_id, additional=len(pages))
 
     bot_id = get_or_create_bot_for_company(conn, company_id)
     document_ids = []
@@ -253,6 +293,8 @@ def import_crawl_pages(conn, company_id: str, crawl_job_id: str, selected_urls: 
     if any(u not in found for u in selected):
         raise SourceError(422, "page_not_discovered", "Selected pages must come from this crawl's discovered list.")
 
+    _check_source_quota(conn, company_id, additional=len(selected))
+
     bot_id = get_or_create_bot_for_company(conn, company_id)
     document_ids, job_ids = [], []
     for page_url in selected:
@@ -297,6 +339,9 @@ def _doc_row(r: dict) -> dict:
         "chunk_count": r["chunk_count"],
         "ready_at": r["ready_at"].isoformat() if r["ready_at"] else None,
         "created_at": r["created_at"].isoformat(),
+        "size_bytes": r["size_bytes"],
+        "disabled_at": r["disabled_at"].isoformat() if r["disabled_at"] else None,
+        "tags": r["tags"] or [],
     }
 
 
@@ -323,7 +368,7 @@ def list_documents(conn, company_id: str, state: str | None = None, kind: str | 
 
     rows = conn.execute(
         f"""
-        SELECT d.id, d.kind, d.title, d.source_url, d.created_at,
+        SELECT d.id, d.kind, d.title, d.source_url, d.created_at, d.size_bytes, d.disabled_at, d.tags,
                dv.id AS version_id, dv.version, dv.status, dv.stage, dv.error_code, dv.chunk_count, dv.ready_at
         FROM documents d {_LATEST_VERSION}
         WHERE {' AND '.join(where)}
@@ -340,7 +385,7 @@ def get_document(conn, company_id: str, document_id: str) -> dict:
     _require_uuid(document_id, "document_not_found", "Document not found.")
     row = conn.execute(
         f"""
-        SELECT d.id, d.kind, d.title, d.source_url, d.created_at,
+        SELECT d.id, d.kind, d.title, d.source_url, d.created_at, d.size_bytes, d.disabled_at, d.tags,
                dv.id AS version_id, dv.version, dv.status, dv.stage, dv.error_code, dv.chunk_count, dv.ready_at
         FROM documents d {_LATEST_VERSION}
         WHERE d.id = %s AND d.company_id = %s AND d.deleted_at IS NULL
@@ -350,6 +395,41 @@ def get_document(conn, company_id: str, document_id: str) -> dict:
     if not row:
         raise SourceError(404, "document_not_found", "Document not found.")
     return _doc_row(row)
+
+
+def set_document_disabled(conn, company_id: str, document_id: str, disabled: bool) -> dict:
+    """D7.4 (knowledge manager): disabling a source excludes it from
+    retrieval (app/chat/pipeline.py's retrieve() and the v2 pipeline's
+    version-id resolution both scope to ready, non-deleted versions of
+    documents the owner hasn't disabled) without deleting its data."""
+    _require_uuid(document_id, "document_not_found", "Document not found.")
+    row = conn.execute(
+        """
+        UPDATE documents SET disabled_at = CASE WHEN %s THEN now() ELSE NULL END
+        WHERE id = %s AND company_id = %s AND deleted_at IS NULL
+        RETURNING id, disabled_at
+        """,
+        (disabled, document_id, company_id),
+    ).fetchone()
+    if not row:
+        raise SourceError(404, "document_not_found", "Document not found.")
+    return {"id": str(row["id"]), "disabled_at": row["disabled_at"].isoformat() if row["disabled_at"] else None}
+
+
+def set_document_tags(conn, company_id: str, document_id: str, tags: list[str]) -> dict:
+    _require_uuid(document_id, "document_not_found", "Document not found.")
+    cleaned = sorted({t.strip() for t in tags if t.strip()})[:50]
+    row = conn.execute(
+        """
+        UPDATE documents SET tags = %s::text[]
+        WHERE id = %s AND company_id = %s AND deleted_at IS NULL
+        RETURNING id, tags
+        """,
+        (cleaned, document_id, company_id),
+    ).fetchone()
+    if not row:
+        raise SourceError(404, "document_not_found", "Document not found.")
+    return {"id": str(row["id"]), "tags": row["tags"] or []}
 
 
 def rename_document(conn, company_id: str, document_id: str, title: str) -> None:

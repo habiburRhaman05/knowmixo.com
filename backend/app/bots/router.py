@@ -56,9 +56,14 @@ def _is_uuid(value: str) -> bool:
 
 @router.get("/bot")
 def get_bot(principal: SessionPrincipal = Depends(get_verified_principal)):
+    """Auto-provisions the company's bot on first access (same lazy-create
+    semantics as every source-creation path) instead of 404ing -- a brand
+    new company that hasn't added a source yet still needs a bot row to
+    render Onboarding/Chatbot/Actions, which all fetch this first."""
     company_id = _require_company(principal)
     try:
         with connection() as conn:
+            service.get_or_create_bot_for_company(conn, company_id)
             bot = service.get_bot(conn, company_id)
     except BotError as exc:
         _raise(exc)

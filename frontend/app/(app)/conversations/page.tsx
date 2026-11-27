@@ -5,14 +5,11 @@ import {
   MessageSquare,
   MessageSquareText,
   Filter,
-  Tag,
-  Loader2,
+  Download,
   AlertTriangle,
   ArrowRight,
-  Search,
   ThumbsUp,
   Users,
-  CheckCircle2,
 } from "lucide-react";
 
 import { TopBar } from "@/components/layout/topbar";
@@ -24,12 +21,18 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { apiFetch } from "@/lib/api-client";
 import { describeError } from "@/lib/errors";
-import { type ConversationListResponse, type ConversationListItem } from "@/lib/types";
+import {
+  type ConversationListResponse,
+  type ConversationListItem,
+  type ConversationStatus,
+  CONVERSATION_STATUS_LABEL,
+  CONVERSATION_STATUS_TONE,
+} from "@/lib/types";
 import { cn, fromNow } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
 
-type Status = "" | "active" | "closed";
+type Status = "" | ConversationStatus;
 type Feedback = "" | "yes" | "no";
 
 export default function ConversationsPage() {
@@ -76,11 +79,24 @@ export default function ConversationsPage() {
   const withFeedback = items?.filter((i) => i.has_feedback).length ?? 0;
   const withLead = items?.filter((i) => i.has_lead).length ?? 0;
 
+  function exportCsv() {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (feedback === "yes") params.set("has_feedback", "true");
+    if (feedback === "no") params.set("has_feedback", "false");
+    window.location.href = `/api/bff/conversations/export.csv?${params.toString()}`;
+  }
+
   return (
     <>
       <TopBar
         title="Conversations"
         description="Every chat visitors had, with citations and leads."
+        actions={
+          <Button variant="secondary" onClick={exportCsv}>
+            <Download className="h-4 w-4" /> Export CSV
+          </Button>
+        }
       />
       <main>
         <PageShell>
@@ -99,8 +115,10 @@ export default function ConversationsPage() {
                 onChange={setStatus}
                 options={[
                   { value: "", label: "All" },
-                  { value: "active", label: "Active" },
-                  { value: "closed", label: "Closed" },
+                  { value: "bot", label: "Bot" },
+                  { value: "queued", label: "Queued" },
+                  { value: "assigned", label: "Assigned" },
+                  { value: "resolved", label: "Resolved" },
                 ]}
               />
               <SegmentedGroup<Feedback>
@@ -149,9 +167,12 @@ export default function ConversationsPage() {
                           <span className="font-medium text-foreground">
                             Conversation {row.id.slice(0, 8)}…
                           </span>
-                          <Badge tone={row.status === "active" ? "primary" : "neutral"}>
-                            {row.status}
-                          </Badge>
+                          <Badge tone={CONVERSATION_STATUS_TONE[row.status]}>{CONVERSATION_STATUS_LABEL[row.status]}</Badge>
+                          {row.tags.map((tag) => (
+                            <Badge key={tag} tone="neutral">
+                              {tag}
+                            </Badge>
+                          ))}
                           {row.has_lead && (
                             <Badge tone="success">
                               <Users className="h-3 w-3" /> Lead

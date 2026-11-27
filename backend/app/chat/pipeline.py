@@ -154,7 +154,7 @@ def visitor_scope(conn, visitor_session_id: str, conversation_id: str) -> Scope:
         FROM publication_sources ps
         JOIN document_versions dv ON dv.id = ps.document_version_id
         JOIN documents d ON d.id = dv.document_id
-        WHERE ps.publication_id = %s AND dv.status = 'ready' AND d.deleted_at IS NULL
+        WHERE ps.publication_id = %s AND dv.status = 'ready' AND d.deleted_at IS NULL AND d.disabled_at IS NULL
         """,
         (row["active_publication_id"],),
     ).fetchall()
@@ -186,7 +186,7 @@ def owner_preview_scope(conn, company_id: str, owner_user_id: str, conversation_
         """
         SELECT dv.id FROM documents d
         JOIN document_versions dv ON dv.id = d.active_version_id
-        WHERE d.company_id = %s AND d.deleted_at IS NULL AND dv.status = 'ready'
+        WHERE d.company_id = %s AND d.deleted_at IS NULL AND d.disabled_at IS NULL AND dv.status = 'ready'
         """,
         (company_id,),
     ).fetchall()
@@ -235,6 +235,23 @@ def _find_replay(conn, conversation_id: str, client_key: str) -> dict | None:
     raise ChatError(409, "request_in_progress", "A request with this Idempotency-Key is already in progress or did not complete. Use a new key to retry.")
 
 
+def _maybe_trigger_escalation(scope: Scope, text: str) -> None:
+    """Minimal v1-side escalation trigger (see app.chat.v1_escalation_trigger
+    docstring for why this exists). Fire-and-forget: a bug here must never
+    break the visitor's chat turn, so every failure is swallowed."""
+    try:
+        from app.chat.v1_escalation_trigger import detect
+        from app.escalation.detector import detect_and_create
+
+        match = detect(text)
+        if not match:
+            return
+        severity, intent, reason = match
+        detect_and_create(scope.company_id, scope.conversation_id, text, intent, severity, reason)
+    except Exception:
+        log.exception("v1 escalation trigger failed")
+
+
 def prepare_turn(scope: Scope, text: str, client_key: str | None) -> Turn:
     """Everything that must happen before any provider call. Raises
     ChatError (mapped to an HTTP error by the router) so a rejected turn
@@ -246,6 +263,7 @@ def prepare_turn(scope: Scope, text: str, client_key: str | None) -> Turn:
         raise ChatError(400, "input_blocked", "This message was blocked by input guardrails.")
 
     quota_error: quota.QuotaExceeded | None = None
+    check_escalation = False
     turn = Turn(scope=scope, question=text)
     with connection() as conn:
         if client_key:
@@ -294,9 +312,18 @@ def prepare_turn(scope: Scope, text: str, client_key: str | None) -> Turn:
             record_event(conn, scope, "message_sent", message_id=turn.user_message_id, properties={"preview": scope.is_preview})
             if not scope.is_preview:
                 _notify_inbox(conn, scope, role="user", text=text, message_id=turn.user_message_id)
+                check_escalation = True
+
+    if check_escalation:
+        _maybe_trigger_escalation(scope, text)
 
     if quota_error:
-        raise ChatError(429, "quota_exhausted", "The daily free usage limit has been reached.", quota_error.retry_after_seconds)
+        message = (
+            "Your plan's monthly AI reply limit has been reached. Upgrade to continue."
+            if quota_error.scope == "plan_monthly"
+            else "The daily free usage limit has been reached."
+        )
+        raise ChatError(429, "quota_exhausted", message, quota_error.retry_after_seconds)
     return turn
 
 
@@ -392,7 +419,7 @@ def finalize_turn(turn: Turn, status: str, content: str, sources: list[dict], us
             (content, status, json.dumps(sources), json.dumps({**usage, "error_code": error_code}), turn.assistant_message_id),
         )
         if status == "completed" and used_llm:
-            quota.commit(conn, scope.company_id, turn.reservation_id, usage.get("total_tokens_est", 0))
+            quota.commit(conn, scope.company_id, turn.reservation_id, usage.get("total_tokens_est", 0), scope.conversation_id)
         else:
             quota.release(conn, turn.reservation_id)
         if embedded:

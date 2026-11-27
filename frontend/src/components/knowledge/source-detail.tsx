@@ -1,15 +1,18 @@
 "use client";
 import * as React from "react";
-import { X, RefreshCw, Trash2, BookOpen, Loader2 } from "lucide-react";
+import { X, RefreshCw, Trash2, BookOpen, Loader2, EyeOff, Tag, Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 import { SourceStatusBadge } from "./status-badge";
 import { apiFetch } from "@/lib/api-client";
 import { describeError } from "@/lib/errors";
 import { type DocumentDetail, type DocumentContent } from "@/lib/types";
 import { useToast } from "@/components/ui/toast";
-import { cn, fromNow } from "@/lib/utils";
+import { cn, fromNow, formatBytes } from "@/lib/utils";
 
 type Props = {
   document: DocumentDetail;
@@ -24,6 +27,68 @@ export function SourceDetail({ document, onClose, onRefresh, onDeleted, onChange
   const [content, setContent] = React.useState<DocumentContent | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [contentError, setContentError] = React.useState<unknown>(null);
+  const [disabling, setDisabling] = React.useState(false);
+  const [tagInput, setTagInput] = React.useState("");
+  const [savingTags, setSavingTags] = React.useState(false);
+  const isDisabled = Boolean(document.disabled_at);
+
+  async function onToggleDisabled() {
+    setDisabling(true);
+    try {
+      await apiFetch(`/api/bff/documents/${document.id}`, {
+        method: "PATCH",
+        json: { disabled: !isDisabled },
+      });
+      toast({
+        tone: "success",
+        title: isDisabled ? "Source re-enabled" : "Source disabled",
+        description: isDisabled
+          ? "This source can be used in answers again."
+          : "This source will no longer be used to answer questions.",
+      });
+      onChanged();
+    } catch (e) {
+      const info = describeError(e);
+      toast({ tone: "danger", title: info.title, description: info.message });
+    } finally {
+      setDisabling(false);
+    }
+  }
+
+  async function addTag(raw: string) {
+    const tag = raw.trim();
+    if (!tag || document.tags.includes(tag)) return;
+    setSavingTags(true);
+    try {
+      await apiFetch(`/api/bff/documents/${document.id}`, {
+        method: "PATCH",
+        json: { tags: [...document.tags, tag] },
+      });
+      setTagInput("");
+      onChanged();
+    } catch (e) {
+      const info = describeError(e);
+      toast({ tone: "danger", title: info.title, description: info.message });
+    } finally {
+      setSavingTags(false);
+    }
+  }
+
+  async function removeTag(tag: string) {
+    setSavingTags(true);
+    try {
+      await apiFetch(`/api/bff/documents/${document.id}`, {
+        method: "PATCH",
+        json: { tags: document.tags.filter((t) => t !== tag) },
+      });
+      onChanged();
+    } catch (e) {
+      const info = describeError(e);
+      toast({ tone: "danger", title: info.title, description: info.message });
+    } finally {
+      setSavingTags(false);
+    }
+  }
 
   React.useEffect(() => {
     if (document.status !== "ready") {
@@ -78,6 +143,7 @@ export function SourceDetail({ document, onClose, onRefresh, onDeleted, onChange
           <h2 className="truncate font-display text-lg font-semibold">{document.title}</h2>
           <p className="text-xs text-muted-foreground">
             Version {document.current_version ?? "-"} · Added {fromNow(document.created_at)}
+            {document.size_bytes ? ` · ${formatBytes(document.size_bytes)}` : ""}
           </p>
         </div>
         <Button variant="ghost" size="icon" aria-label="Close source detail" onClick={onClose}>
@@ -86,6 +152,66 @@ export function SourceDetail({ document, onClose, onRefresh, onDeleted, onChange
       </header>
 
       <div className="flex-1 overflow-y-auto p-5">
+        <section className="mb-5 flex items-center justify-between rounded-lg border border-border bg-subtle/60 p-3">
+          <div className="flex items-center gap-2.5">
+            <EyeOff aria-hidden className="h-4 w-4 text-muted-foreground" />
+            <div>
+              <p className="text-sm font-medium">{isDisabled ? "Disabled" : "Available to the assistant"}</p>
+              <p className="text-xs text-muted-foreground">
+                {isDisabled
+                  ? "This source is excluded from retrieval until re-enabled."
+                  : "This source can be used to answer questions."}
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={!isDisabled}
+            disabled={disabling}
+            onCheckedChange={() => void onToggleDisabled()}
+            aria-label={isDisabled ? "Enable source" : "Disable source"}
+          />
+        </section>
+
+        <section className="mb-5 rounded-lg border border-border bg-subtle/60 p-3">
+          <p className="mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted-foreground">
+            <Tag className="h-3.5 w-3.5" /> Tags
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {document.tags.map((tag) => (
+              <Badge key={tag} tone="primary" className="gap-1">
+                {tag}
+                <button
+                  type="button"
+                  aria-label={`Remove tag ${tag}`}
+                  onClick={() => void removeTag(tag)}
+                  disabled={savingTags}
+                  className="ml-0.5 rounded-full hover:text-destructive"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </Badge>
+            ))}
+            <Input
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void addTag(tagInput);
+                }
+              }}
+              placeholder="Add a tag…"
+              disabled={savingTags}
+              className="h-7 w-28 text-xs"
+            />
+            {tagInput.trim() && (
+              <Button variant="ghost" size="sm" onClick={() => void addTag(tagInput)} disabled={savingTags}>
+                <Plus className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
+        </section>
+
         {document.source_url && (
           <section className="mb-5 rounded-lg border border-border bg-subtle/60 p-3">
             <p className="text-xs uppercase tracking-wide text-muted-foreground">Source URL</p>

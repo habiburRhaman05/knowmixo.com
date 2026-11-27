@@ -57,6 +57,16 @@ def process_one(lease_seconds: int, executors: dict | None = None) -> bool:
     if job is None:
         return False
 
+    # `jobs` has no `payload` column -- enqueue_job()'s `payload=` kwarg is
+    # stored under `checkpoint_ref` (app/job_idempotency.py). Several
+    # executors (escalation_dispatch, escalation_timeout_check,
+    # compute_gaps, evaluate_alerts, send_dunning_email) read
+    # `job["payload"]`, which a bare `RETURNING *` never provides -- this
+    # was a real bug: every one of those executors raised
+    # PermanentJobError("missing_...") on its first real run, since
+    # job.get("payload") always came back {}.
+    job["payload"] = job.get("checkpoint_ref") or {}
+
     job_id = str(job["id"])
     lease_token = job["lease_token"]
     executor = executors.get(job["kind"])

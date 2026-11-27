@@ -6,8 +6,6 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { User, Building2, KeyRound, ShieldCheck, LogOut, Save, Loader2 } from "lucide-react";
 
-import { TopBar } from "@/components/layout/topbar";
-import { PageShell } from "@/components/layout/page-shell";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
@@ -22,8 +20,10 @@ import { apiFetch } from "@/lib/api-client";
 import { changePasswordSchema, nameSchema } from "@/lib/auth-schemas";
 import { useToast } from "@/components/ui/toast";
 import { describeError } from "@/lib/errors";
+import { useCompany, useSetCompanyData } from "@/lib/hooks/use-company";
 import { z } from "zod";
 import { FormErrorAlert } from "@/components/auth/form-errors";
+import type { CompanyResponse } from "@/lib/types";
 
 type MeResponse = {
   id: string;
@@ -31,14 +31,6 @@ type MeResponse = {
   name: string | null;
   avatar_key: string | null;
   email_verified_at: string | null;
-};
-type CompanyResponse = {
-  id: string;
-  name: string;
-  website: string | null;
-  industry: string | null;
-  contact: string | null;
-  logo_key: string | null;
 };
 
 const profileSchema = z.object({ name: nameSchema });
@@ -58,21 +50,17 @@ export default function SettingsPage() {
   const router = useRouter();
   const { toast } = useToast();
   const [me, setMe] = React.useState<MeResponse | null>(null);
-  const [company, setCompany] = React.useState<CompanyResponse | null>(null);
   const [loadError, setLoadError] = React.useState<unknown>(null);
+  const companyQuery = useCompany();
+  const setCompanyData = useSetCompanyData();
+  const company = companyQuery.data ?? null;
 
   React.useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const [m, c] = await Promise.all([
-          apiFetch<MeResponse>("/api/bff/me"),
-          apiFetch<CompanyResponse>("/api/bff/company").catch(() => null),
-        ]);
-        if (!cancelled) {
-          setMe(m);
-          setCompany(c);
-        }
+        const m = await apiFetch<MeResponse>("/api/bff/me");
+        if (!cancelled) setMe(m);
       } catch (e) {
         if (!cancelled) setLoadError(e);
       }
@@ -95,33 +83,28 @@ export default function SettingsPage() {
 
   return (
     <>
-      <TopBar title="Settings" description="Profile, company and security." />
-      <main>
-        <PageShell>
-          {loadError ? (() => {
-            const info = describeError(loadError);
-            return (
-              <Alert tone="danger" title={info.title}>
-                {info.message}
-              </Alert>
-            );
-          })() : null}
-          {!loadError && !me && <div className="h-80 skeleton" />}
-          {me && (
-            <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-              <div className="space-y-6">
-                <ProfileCard me={me} onSaved={setMe} />
-                <CompanyCard company={company} onSaved={setCompany} />
-                <ChangePasswordCard />
-              </div>
-              <aside className="space-y-6">
-                <SecurityCard me={me} onSignOutAll={signOutAll} />
-                <DeleteAccountCard email={me.email} />
-              </aside>
-            </div>
-          )}
-        </PageShell>
-      </main>
+      {loadError ? (() => {
+        const info = describeError(loadError);
+        return (
+          <Alert tone="danger" title={info.title}>
+            {info.message}
+          </Alert>
+        );
+      })() : null}
+      {!loadError && !me && <div className="h-80 skeleton" />}
+      {me && (
+        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+          <div className="space-y-6">
+            <ProfileCard me={me} onSaved={setMe} />
+            <CompanyCard company={company} onSaved={setCompanyData} />
+            <ChangePasswordCard />
+          </div>
+          <aside className="space-y-6">
+            <SecurityCard me={me} onSignOutAll={signOutAll} />
+            <DeleteAccountCard email={me.email} />
+          </aside>
+        </div>
+      )}
     </>
   );
 }

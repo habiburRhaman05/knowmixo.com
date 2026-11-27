@@ -13,9 +13,11 @@ import {
   AlertTriangle,
   Sparkles,
   TrendingUp,
+  TrendingDown,
   Plus,
   ArrowUpRight,
   Clock,
+  Zap,
 } from "lucide-react";
 
 import { TopBar } from "@/components/layout/topbar";
@@ -37,9 +39,19 @@ type DashboardResponse = {
   usage_summary: { requests_today: number; limit: number; quota_state: "ok" | "exhausted" };
 };
 
+type ConversationsPoint = { day: string; count: number };
+type DeflectionPoint = { day: string; total: number; deflected: number; deflection_rate: number | null };
+type TtftPoint = { day: string; p50_ms: number | null; p95_ms: number | null; sample_count: number };
+
+type AnalyticsSeries = {
+  conversations: ConversationsPoint[];
+  deflection: DeflectionPoint[];
+  ttft: TtftPoint[];
+};
+
 type LoadState =
   | { kind: "loading" }
-  | { kind: "ready"; data: DashboardResponse }
+  | { kind: "ready"; data: DashboardResponse; series: AnalyticsSeries }
   | { kind: "error"; error: unknown };
 
 /**
@@ -56,7 +68,22 @@ export default function OverviewPage() {
     void (async () => {
       try {
         const data = await apiFetch<DashboardResponse>("/api/bff/dashboard");
-        if (!cancelled) setState({ kind: "ready", data });
+        // Analytics series are a newer, additive surface -- a failure here
+        // (or on a fresh company with no data yet) must never block the
+        // rest of Overview from rendering, so each is fetched independently
+        // with an empty-array fallback rather than failing the whole page.
+        const [conversations, deflection, ttft] = await Promise.all([
+          apiFetch<{ series: ConversationsPoint[] }>("/api/bff/analytics/series?metric=conversations")
+            .then((r) => r.series)
+            .catch(() => [] as ConversationsPoint[]),
+          apiFetch<{ series: DeflectionPoint[] }>("/api/bff/analytics/series?metric=deflection")
+            .then((r) => r.series)
+            .catch(() => [] as DeflectionPoint[]),
+          apiFetch<{ series: TtftPoint[] }>("/api/bff/analytics/series?metric=ttft")
+            .then((r) => r.series)
+            .catch(() => [] as TtftPoint[]),
+        ]);
+        if (!cancelled) setState({ kind: "ready", data, series: { conversations, deflection, ttft } });
       } catch (error) {
         if (!cancelled) setState({ kind: "error", error });
       }
@@ -77,14 +104,14 @@ export default function OverviewPage() {
               {describeError(state.error).message}
             </Alert>
           )}
-          {state.kind === "ready" && <OverviewReady data={state.data} />}
+          {state.kind === "ready" && <OverviewReady data={state.data} series={state.series} />}
         </PageShell>
       </main>
     </>
   );
 }
 
-function OverviewReady({ data }: { data: DashboardResponse }) {
+function OverviewReady({ data, series }: { data: DashboardResponse; series: AnalyticsSeries }) {
   const totalSources = Object.values(data.source_counts_by_state).reduce((a, b) => a + b, 0);
   const ready = data.source_counts_by_state.ready ?? 0;
   const processing =
@@ -101,11 +128,20 @@ function OverviewReady({ data }: { data: DashboardResponse }) {
   const checklistPct = Math.round((checklistDone / Math.max(1, data.setup_checklist.length)) * 100);
   const nextAction = data.setup_checklist.find((i) => !i.done) ?? null;
 
-  // Lightweight placeholder series so the sparklines don't stay flat. Once
-  // the backend exposes a /usage/series endpoint we swap these in.
+  // Knowledge sources and today's usage don't have a backend time-series
+  // endpoint (only conversations/deflection/TTFT do, per 05-RAG-V2-SPEC.md
+  // and this sprint's own analytics work) -- those two sparklines stay a
+  // lightweight placeholder shape; conversations now uses the real series.
   const sourceSeries = pseudoSeries(totalSources);
-  const convoSeries = pseudoSeries(data.conversation_count);
   const usageSeries = pseudoSeries(usage.requests_today || 1);
+  const convoSeries = series.conversations.length > 0 ? series.conversations.map((p) => p.count) : pseudoSeries(data.conversation_count);
+  const convoDelta = weekOverWeekDelta(series.conversations.map((p) => p.count));
+
+  const latestDeflection = [...series.deflection].reverse().find((p) => p.deflection_rate !== null);
+  const deflectionSeries = series.deflection.filter((p) => p.deflection_rate !== null).map((p) => Math.round((p.deflection_rate ?? 0) * 100));
+
+  const latestTtft = [...series.ttft].reverse().find((p) => p.p50_ms !== null);
+  const ttftSeries = series.ttft.filter((p) => p.p50_ms !== null).map((p) => p.p50_ms ?? 0);
 
   return (
     <div className="space-y-8">
@@ -161,7 +197,7 @@ function OverviewReady({ data }: { data: DashboardResponse }) {
           hint="Across every surface"
           href="/conversations"
           series={convoSeries}
-          delta={data.conversation_count > 0 ? "+12% w/w" : undefined}
+          delta={convoDelta}
         />
         <KpiTile
           icon={Gauge}
@@ -172,6 +208,22 @@ function OverviewReady({ data }: { data: DashboardResponse }) {
           progress={pct}
           href="/usage"
           series={usageSeries}
+        />
+        <KpiTile
+          icon={TrendingUp}
+          label="Deflection rate"
+          value={latestDeflection ? `${Math.round((latestDeflection.deflection_rate ?? 0) * 100)}%` : "—"}
+          hint="Resolved by the bot, no handoff"
+          href="/conversations"
+          series={deflectionSeries.length > 1 ? deflectionSeries : undefined}
+        />
+        <KpiTile
+          icon={Zap}
+          label="Median response time"
+          value={latestTtft?.p50_ms ? `${(latestTtft.p50_ms / 1000).toFixed(1)}s` : "—"}
+          hint="Time to first word (p50)"
+          href="/conversations"
+          series={ttftSeries.length > 1 ? ttftSeries : undefined}
         />
       </section>
 
@@ -312,8 +364,13 @@ function KpiTile({
           />
         )}
         {delta && (
-          <span className="inline-flex items-center gap-0.5 text-xs font-medium text-success">
-            <TrendingUp className="h-3 w-3" />
+          <span
+            className={cn(
+              "inline-flex items-center gap-0.5 text-xs font-medium",
+              delta.startsWith("-") ? "text-destructive" : "text-success"
+            )}
+          >
+            {delta.startsWith("-") ? <TrendingDown className="h-3 w-3" /> : <TrendingUp className="h-3 w-3" />}
             {delta}
           </span>
         )}
@@ -511,6 +568,18 @@ function pseudoSeries(latest: number): number[] {
     const val = Math.max(0, Math.round(base * factor * (0.6 + i / length)));
     return val;
   }).concat(latest);
+}
+
+/** Real week-over-week % change from a daily series (last 7 days' total
+ * vs. the 7 days before that). Returns undefined when there isn't two
+ * full weeks of data yet, rather than showing a misleading number. */
+function weekOverWeekDelta(dailyCounts: number[]): string | undefined {
+  if (dailyCounts.length < 14) return undefined;
+  const last7 = dailyCounts.slice(-7).reduce((a, b) => a + b, 0);
+  const prior7 = dailyCounts.slice(-14, -7).reduce((a, b) => a + b, 0);
+  if (prior7 === 0) return last7 > 0 ? "+100% w/w" : undefined;
+  const pct = Math.round(((last7 - prior7) / prior7) * 100);
+  return `${pct >= 0 ? "+" : ""}${pct}% w/w`;
 }
 
 function sampleActivity({

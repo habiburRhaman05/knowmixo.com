@@ -29,43 +29,58 @@ import { ApiError } from "@/lib/errors";
 import {
   DEFAULT_CONFIG,
   diffConfig,
+  INDUSTRY_TEMPLATES,
   LANGUAGE_OPTIONS,
   TEMPLATES,
   TONE_OPTIONS,
   type DraftConfig,
 } from "@/components/chatbot/studio-config";
 import { cn } from "@/lib/utils";
+import { useBot, useSetBotData } from "@/lib/hooks/use-bot";
 import type { BotResponse, LeadFormResponse } from "@/lib/types";
 
 export default function ChatbotStudio() {
   const { toast } = useToast();
-  const [bot, setBot] = React.useState<BotResponse | null>(null);
+  const botQuery = useBot();
+  const setBotData = useSetBotData();
+  const bot = botQuery.data ?? null;
   const [draft, setDraft] = React.useState<DraftConfig>(DEFAULT_CONFIG);
   const [savedDraft, setSavedDraft] = React.useState<DraftConfig>(DEFAULT_CONFIG);
   const [revision, setRevision] = React.useState(1);
   const [saving, setSaving] = React.useState(false);
-  const [loadError, setLoadError] = React.useState<unknown>(null);
   const [leadForm, setLeadForm] = React.useState<LeadFormResponse | null>(null);
   const [previewConversationId, setPreviewConversationId] = React.useState<string | null>(null);
+  const [leadFormLoading, setLeadFormLoading] = React.useState(true);
+  const seededRef = React.useRef(false);
+
+  // Seeds local draft/savedDraft/revision the first time the shared bot
+  // query resolves (not on every refetch) -- a cache update from another
+  // page (e.g. after a save elsewhere) must not stomp in-progress local
+  // edits the way the old per-page fetch used to.
+  React.useEffect(() => {
+    if (botQuery.data && !seededRef.current) {
+      seededRef.current = true;
+      const merged = { ...DEFAULT_CONFIG, ...(botQuery.data.draft_config as DraftConfig) };
+      setDraft(merged);
+      setSavedDraft(merged);
+      setRevision(botQuery.data.draft_revision);
+    }
+  }, [botQuery.data]);
 
   React.useEffect(() => {
     void (async () => {
       try {
-        const [botResp, leadResp] = await Promise.all([
-          apiFetch<BotResponse>("/api/bff/bot"),
-          apiFetch<LeadFormResponse>("/api/bff/bot/lead-form").catch(() => null),
-        ]);
-        setBot(botResp);
-        const merged = { ...DEFAULT_CONFIG, ...(botResp.draft_config as DraftConfig) };
-        setDraft(merged);
-        setSavedDraft(merged);
-        setRevision(botResp.draft_revision);
-        setLeadForm(leadResp);
-      } catch (e) {
-        setLoadError(e);
+        setLeadForm(await apiFetch<LeadFormResponse>("/api/bff/bot/lead-form"));
+      } catch {
+        setLeadForm(null);
+      } finally {
+        setLeadFormLoading(false);
       }
     })();
   }, []);
+
+  const loading = botQuery.isPending || leadFormLoading;
+  const loadError = botQuery.error;
 
   const dirty = React.useMemo(() => JSON.stringify(draft) !== JSON.stringify(savedDraft), [draft, savedDraft]);
 
@@ -80,6 +95,9 @@ export default function ChatbotStudio() {
       });
       setRevision(resp.draft_revision);
       setSavedDraft(draft);
+      if (botQuery.data) {
+        setBotData({ ...botQuery.data, draft_config: draft, draft_revision: resp.draft_revision });
+      }
       toast({ tone: "success", title: "Draft saved" });
     } catch (e) {
       if (e instanceof ApiError && e.code === "draft_revision_conflict") {
@@ -93,6 +111,7 @@ export default function ChatbotStudio() {
           const merged = { ...DEFAULT_CONFIG, ...(botResp.draft_config as DraftConfig) };
           setSavedDraft(merged);
           setRevision(botResp.draft_revision);
+          setBotData(botResp);
         } catch {
           /* fall-through */
         }
@@ -134,6 +153,25 @@ export default function ChatbotStudio() {
             <Alert tone="danger" title={describeError(loadError).title}>
               {describeError(loadError).message}
             </Alert>
+          </PageShell>
+        </main>
+      </>
+    );
+  }
+
+  if (loading) {
+    return (
+      <>
+        <TopBar title="Chatbot" description="Shape how your assistant talks, then publish when ready." />
+        <main>
+          <PageShell>
+            <div className="grid gap-6 lg:grid-cols-[1fr_440px] xl:grid-cols-[1fr_520px]">
+              <div className="space-y-6">
+                <div className="h-64 skeleton rounded-2xl" />
+                <div className="h-48 skeleton rounded-2xl" />
+              </div>
+              <div className="h-[560px] skeleton rounded-2xl" />
+            </div>
           </PageShell>
         </main>
       </>
@@ -217,6 +255,12 @@ function BehaviorCard({
     setDraft((d) => ({ ...d, instructions: tpl.instructions }));
   }
 
+  function applyIndustryTemplate(key: string) {
+    const tpl = INDUSTRY_TEMPLATES.find((t) => t.key === key);
+    if (!tpl) return;
+    setDraft((d) => ({ ...d, instructions: tpl.instructions, greeting: tpl.greeting, suggestions: tpl.suggestions }));
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -267,6 +311,23 @@ function BehaviorCard({
                   key={t.key}
                   type="button"
                   onClick={() => applyTemplate(t.key)}
+                  className="rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-foreground hover:border-primary/40 hover:bg-accent"
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </Field>
+
+        <Field label="Industry starter" hint="Sets instructions, greeting and suggested questions together.">
+          {() => (
+            <div className="flex flex-wrap gap-2">
+              {INDUSTRY_TEMPLATES.map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => applyIndustryTemplate(t.key)}
                   className="rounded-full border border-border bg-card px-3 py-1 text-xs font-medium text-foreground hover:border-primary/40 hover:bg-accent"
                 >
                   {t.name}

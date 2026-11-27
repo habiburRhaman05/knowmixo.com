@@ -107,6 +107,21 @@ const config: Config = {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        // Opacity-only: safe for any element whose own `transform` is load-
+        // bearing (Dialog's translate(-50%,-50%) centering, or a Radix
+        // Popper content's dynamically computed inline transform). A CSS
+        // animation's keyframe values win the cascade for that property
+        // over both static rules and inline styles for as long as the
+        // animation's fill-mode holds (`both`, here) -- `fade-in` above
+        // setting `transform: translateY(...)` was silently overwriting
+        // that positioning transform once the animation finished, which is
+        // why dialogs/popovers/dropdowns/selects/tooltips were rendering
+        // with their top-left corner at their intended center point instead
+        // of actually being centered/positioned there.
+        "fade-in-opacity": {
+          from: { opacity: "0" },
+          to: { opacity: "1" },
+        },
         shimmer: {
           "0%": { transform: "translateX(-100%)" },
           "100%": { transform: "translateX(100%)" },
@@ -120,6 +135,7 @@ const config: Config = {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         "fade-in": "fade-in 0.25s ease-out both",
+        "fade-in-opacity": "fade-in-opacity 0.2s ease-out both",
         shimmer: "shimmer 1.6s linear infinite",
         "pulse-ring": "pulse-ring 2s cubic-bezier(0.4,0,0.2,1) infinite",
       },

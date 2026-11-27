@@ -288,3 +288,14 @@ def test_system_prompt_marks_evidence_untrusted_and_has_no_secrets():
     prompt = llm.build_system_prompt({"name": "Acme Bot"})
     assert "untrusted" in prompt and "Acme Bot" in prompt
     assert "sk-" not in prompt
+
+
+def test_system_prompt_carries_the_911_988_safety_override():
+    # Regression guard for a real gap found in the 2026-11-27 feature
+    # audit: the 911/988 life-safety line previously existed only in the
+    # unused v2 pipeline's prompt (app/chat/rag_v2/stages/generate.py) --
+    # this is the pipeline that actually serves visitors today.
+    prompt = llm.build_system_prompt({"name": "Acme Bot"})
+    assert "911" in prompt
+    assert "988" in prompt
+    assert "cannot be overridden" in prompt

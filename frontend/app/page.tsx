@@ -12,16 +12,21 @@ export default function HomePage() {
           <Link href="/" aria-label="Knowmivo home" className="flex items-center gap-2">
             <Logo withWordmark />
           </Link>
-          <div className="flex items-center gap-2">
-            <Button asChild variant="ghost" size="sm">
-              <Link href="/login">Sign in</Link>
-            </Button>
-            <Button asChild size="sm">
-              <Link href="/signup">
-                Get started
-                <ArrowRight className="h-4 w-4" />
-              </Link>
-            </Button>
+          <div className="flex items-center gap-6">
+            <Link href="/pricing" className="hidden text-sm text-muted-foreground hover:text-foreground sm:inline">
+              Pricing
+            </Link>
+            <div className="flex items-center gap-2">
+              <Button asChild variant="ghost" size="sm">
+                <Link href="/login">Sign in</Link>
+              </Button>
+              <Button asChild size="sm">
+                <Link href="/signup">
+                  Get started
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </Button>
+            </div>
           </div>
         </nav>
       </header>
@@ -159,6 +164,15 @@ export default function HomePage() {
             <span className="text-sm text-muted-foreground">© {new Date().getFullYear()} Knowmivo</span>
           </div>
           <div className="flex gap-6 text-sm text-muted-foreground">
+            <Link href="/pricing" className="hover:text-foreground">
+              Pricing
+            </Link>
+            <Link href="/privacy" className="hover:text-foreground">
+              Privacy
+            </Link>
+            <Link href="/terms" className="hover:text-foreground">
+              Terms
+            </Link>
             <Link href="/login" className="hover:text-foreground">
               Sign in
             </Link>

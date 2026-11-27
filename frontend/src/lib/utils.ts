@@ -30,6 +30,16 @@ export function fromNow(input: string | Date | number): string {
   return fmt.format(0, "second");
 }
 
+/** Human-readable file size ("128 KB", "4.2 MB"). */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || bytes < 0) return "—";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** exp;
+  return `${exp === 0 ? value : value.toFixed(1)} ${units[exp]}`;
+}
+
 /** Keep a short, safe identifier for aria-describedby / data-* props. */
 export function slug(input: string): string {
   return input
